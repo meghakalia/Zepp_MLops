@@ -1,4 +1,4 @@
-.PHONY: help setup up down pull-data train serve logs clean
+.PHONY: help setup demo up down serve logs clean train train-gpu train-local test-api setup-data
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -8,16 +8,36 @@ help: ## Show this help
 # Setup
 # ============================================================
 
-setup: ## Create .env from example and build containers
+setup: ## Create .env from example and build all containers
 	@test -f .env || cp .env.example .env
-	@echo "Edit .env with your API tokens, then run: make up"
 	docker compose build
+	@echo ""
+	@echo "Done! Next: run 'make setup-data' then 'make demo'"
+
+setup-data: ## Copy local data from DeepBiocharge into this project
+	./scripts/setup_local_data.sh
+
+# ============================================================
+# Demo (Full Stack)
+# ============================================================
+
+demo: ## Start ALL services (Prefect + MLflow + Inference + Prometheus + Grafana)
+	docker compose up -d
+	@echo ""
+	@echo "=== All Services Running ==="
+	@echo "Prefect UI:    http://localhost:4200"
+	@echo "MLflow UI:     http://localhost:5000"
+	@echo "FastAPI Docs:  http://localhost:8000/docs"
+	@echo "Grafana:       http://localhost:3000  (admin/admin)"
+	@echo "Prometheus:    http://localhost:9090"
+	@echo ""
+	@echo "Next: run 'make train-local' to train with local data"
 
 # ============================================================
 # Services
 # ============================================================
 
-up: ## Start Prefect + MLflow
+up: ## Start core services only (Prefect + MLflow)
 	docker compose up -d prefect mlflow
 
 down: ## Stop all services
@@ -30,36 +50,37 @@ logs: ## Tail logs from all running services
 	docker compose logs -f
 
 # ============================================================
-# Pipeline Commands
+# Training
 # ============================================================
 
-pull-data: ## Run data ingestion pipeline
-	docker compose run --rm prefect python -m src.pipelines.data_flow
+train-local: ## Train model using local data (no API pull)
+	docker compose run --rm prefect python -m src.pipelines.local_train_flow
 
-train: ## Run model training (CPU)
+train: ## Run model training via Prefect (CPU)
 	docker compose --profile training run --rm trainer
 
-train-gpu: ## Run model training (GPU)
+train-gpu: ## Run model training with GPU
 	docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
 		--profile training run --rm trainer
 
-full-pipeline: ## Run end-to-end pipeline (pull data + train)
-	docker compose run --rm prefect python -m src.pipelines.full_flow
-
 # ============================================================
-# Monitoring (Phase 2)
+# Testing
 # ============================================================
 
-monitoring-up: ## Start Prometheus + Grafana
-	docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d prometheus grafana
+test-api: ## Test inference API endpoints
+	@echo "=== Health Check ==="
+	@curl -s http://localhost:8000/health | python3 -m json.tool
+	@echo ""
+	@echo "=== Model Info ==="
+	@curl -s http://localhost:8000/model-info | python3 -m json.tool
+	@echo ""
+	@echo "=== Metrics ==="
+	@curl -s http://localhost:8000/metrics
 
 # ============================================================
-# Development
+# Cleanup
 # ============================================================
 
-test-api: ## Test inference API health endpoint
-	@curl -s http://localhost:8000/health | python -m json.tool
-
-clean: ## Remove data, models, and MLflow artifacts
-	rm -rf data/raw/* data/processed/* models/checkpoints/* mlflow/
-	@echo "Cleaned data, models, and MLflow artifacts"
+clean: ## Remove generated data, models, and MLflow artifacts
+	rm -rf models/checkpoints/* mlflow/
+	@echo "Cleaned checkpoints and MLflow artifacts"

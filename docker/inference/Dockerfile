@@ -3,8 +3,10 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install only inference dependencies (CPU-only torch, no GPU)
+
 RUN pip install --no-cache-dir \
-    torch --index-url https://download.pytorch.org/whl/cpu \
+    torch \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
     fastapi \
     uvicorn \
     mlflow \

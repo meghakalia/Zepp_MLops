@@ -8,6 +8,7 @@ dist/
 build/
 
 # Data
+Data/
 data/raw/*
 data/processed/*
 !data/raw/.gitkeep
