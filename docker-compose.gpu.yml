@@ -1,0 +1,15 @@
+# GPU override for training container.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm trainer
+
+services:
+  trainer:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0

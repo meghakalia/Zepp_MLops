@@ -1,0 +1,95 @@
+services:
+  # ============================================================
+  # Prefect - Pipeline Orchestration
+  # UI: http://localhost:4200
+  # ============================================================
+  prefect:
+    build:
+      context: .
+      dockerfile: docker/prefect/Dockerfile
+    ports:
+      - "4200:4200"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    env_file:
+      - .env
+    environment:
+      - PREFECT_API_URL=http://0.0.0.0:4200/api
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:4200/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================
+  # MLflow - Experiment Tracking + Model Registry
+  # UI: http://localhost:5000
+  # ============================================================
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.0
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlflow:/mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================
+  # Trainer - Model Training (CPU version)
+  # Use docker-compose.gpu.yml override for GPU
+  # ============================================================
+  trainer:
+    build:
+      context: .
+      dockerfile: docker/trainer/Dockerfile
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    env_file:
+      - .env
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    profiles:
+      - training
+
+  # ============================================================
+  # Inference - FastAPI Prediction Server
+  # API: http://localhost:8000
+  # Docs: http://localhost:8000/docs
+  # ============================================================
+  inference:
+    build:
+      context: .
+      dockerfile: docker/inference/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models:ro
+    env_file:
+      - .env
+    environment:
+      - MODEL_CHECKPOINT_DIR=/app/models/production
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped

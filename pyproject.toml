@@ -1,0 +1,49 @@
+[project]
+name = "biocharge-mlops"
+version = "0.1.0"
+description = "MLOps pipeline for biocharge prediction using MLP_delta model"
+requires-python = ">=3.12"
+
+dependencies = [
+    # Data ingestion
+    "requests>=2.32.0",
+    "pandas>=2.3.0",
+    "numpy>=2.3.0",
+    "openpyxl>=3.1.0",
+    "tqdm>=4.67.0",
+
+    # ML
+    "torch>=2.4.0",
+    "scikit-learn>=1.7.0",
+
+    # Orchestration
+    "prefect>=2.0,<3.0",
+
+    # Experiment tracking & model registry
+    "mlflow>=2.10.0",
+
+    # Inference
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+
+    # Config
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "httpx>=0.28.0",
+]
+monitoring = [
+    "prometheus-client>=0.21.0",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
