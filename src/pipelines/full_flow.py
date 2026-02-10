@@ -14,6 +14,7 @@ from prefect.deployments import run_deployment
 
 from src.pipelines.data_flow import data_ingestion_flow
 from src.pipelines.train_flow import training_flow
+from src.pipelines.inference_flow import fresh_inference_flow
 
 load_dotenv()
 
@@ -25,9 +26,10 @@ def full_pipeline(
     to_date: str | None = None,
     data_dir: str = "./data",
     training_config: dict | None = None,
+    run_inference: bool = False,
 ):
     """
-    End-to-end pipeline: pull data → train model.
+    End-to-end pipeline: pull data → train model → (optional) run inference.
 
     Args:
         user_ids: List of user IDs (or read from env)
@@ -35,6 +37,7 @@ def full_pipeline(
         to_date: Data pull end date
         data_dir: Base data directory
         training_config: Model training hyperparameters
+        run_inference: If True, run fresh inference after training to validate new model
     """
     logger = get_run_logger()
 
@@ -61,10 +64,27 @@ def full_pipeline(
     )
     logger.info("Training result: %s", training_result)
 
+    # Step 3 (optional): Run fresh inference to validate new model
+    inference_result = None
+    if run_inference:
+        logger.info("=== Step 3: Fresh Inference Validation ===")
+        inference_result = fresh_inference_flow(
+            user_ids=user_ids,
+            from_date=from_date,
+            to_date=to_date,
+            model_dir=training_result.get("checkpoint_dir", "models/production"),
+            data_dir=data_dir,
+        )
+        logger.info(
+            "Inference result: total=%d, success=%d, failed=%d",
+            inference_result["total"], inference_result["success"], inference_result["failed"],
+        )
+
     return {
         "status": "success",
         "ingestion": ingestion_result,
         "training": training_result,
+        "inference": inference_result,
     }
 
 
