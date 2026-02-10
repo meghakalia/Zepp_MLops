@@ -47,6 +47,9 @@ _metrics = {
     "autoregressive_predictions_total": 0,
     "autoregressive_latency_sum": 0.0,
     "autoregressive_latency_count": 0,
+    "last_autoregressive_mae": 0.0,
+    "last_autoregressive_rmse": 0.0,
+    "last_autoregressive_mse": 0.0,
 }
 # Default paths (overridable via env vars or request body)
 DEFAULT_DATA_DIR = os.environ.get(
@@ -174,7 +177,6 @@ async def health(request: Request):
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(request: PredictRequest, fastapi_request: Request):
-    breakpoint()
     predictor = fastapi_request.app.state.predictor
     if predictor is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -238,6 +240,9 @@ async def autoregressive(request: AutoregressiveRequest, fastapi_request: Reques
         _metrics["autoregressive_predictions_total"] += 1
         _metrics["autoregressive_latency_sum"] += time.time() - start
         _metrics["autoregressive_latency_count"] += 1
+        _metrics["last_autoregressive_mae"] = results["mae"]
+        _metrics["last_autoregressive_rmse"] = results["rmse"]
+        _metrics["last_autoregressive_mse"] = results["mse"]
         return AutoregressiveResponse(**{
             k: results[k]
             for k in AutoregressiveResponse.model_fields
@@ -266,6 +271,9 @@ async def autoregressive_plot(request: AutoregressiveRequest, fastapi_request: R
         _metrics["autoregressive_predictions_total"] += 1
         _metrics["autoregressive_latency_sum"] += time.time() - start
         _metrics["autoregressive_latency_count"] += 1
+        _metrics["last_autoregressive_mae"] = results["mae"]
+        _metrics["last_autoregressive_rmse"] = results["rmse"]
+        _metrics["last_autoregressive_mse"] = results["mse"]
         return Response(content=png_bytes, media_type="image/png")
     except HTTPException:
         raise
@@ -289,11 +297,10 @@ async def model_info(request: Request):
 
 @app.get("/metrics")
 async def metrics(request: Request):
-    predictor = request.app.state.predictor
-    if predictor is None:
-        return {"error": "Model not loaded"}
-
     """Prometheus-format metrics endpoint for Grafana scraping."""
+    predictor = request.app.state.predictor
+    model_loaded = 1 if predictor is not None else 0
+
     avg_latency = (
         _metrics["prediction_latency_sum"] / _metrics["prediction_latency_count"]
         if _metrics["prediction_latency_count"] > 0
@@ -331,7 +338,19 @@ async def metrics(request: Request):
         "",
         "# HELP biocharge_model_loaded Whether model is loaded",
         "# TYPE biocharge_model_loaded gauge",
-        f"biocharge_model_loaded {1 if predictor is not None else 0}",
+        f"biocharge_model_loaded {model_loaded}",
+        "",
+        "# HELP biocharge_autoregressive_mae Last autoregressive inference MAE",
+        "# TYPE biocharge_autoregressive_mae gauge",
+        f'biocharge_autoregressive_mae {_metrics["last_autoregressive_mae"]:.6f}',
+        "",
+        "# HELP biocharge_autoregressive_rmse Last autoregressive inference RMSE",
+        "# TYPE biocharge_autoregressive_rmse gauge",
+        f'biocharge_autoregressive_rmse {_metrics["last_autoregressive_rmse"]:.6f}',
+        "",
+        "# HELP biocharge_autoregressive_mse Last autoregressive inference MSE",
+        "# TYPE biocharge_autoregressive_mse gauge",
+        f'biocharge_autoregressive_mse {_metrics["last_autoregressive_mse"]:.6f}',
         "",
     ]
     return Response(content="\n".join(lines), media_type="text/plain")

@@ -12,12 +12,18 @@ RUN pip install --no-cache-dir \
     mlflow \
     numpy \
     scikit-learn \
-    python-dotenv
+    python-dotenv \
+    pandas \
+    openpyxl \
+    matplotlib \
+    tqdm
 
 # Copy only what inference needs (standalone)
 COPY src/__init__.py src/__init__.py
 COPY src/training/__init__.py src/training/__init__.py
 COPY src/training/model.py src/training/model.py
+COPY src/training/dataset_delta_v2.py src/training/dataset_delta_v2.py
+COPY src/training/utils.py src/training/utils.py
 COPY src/inference/ src/inference/
 
 ENV PYTHONPATH=/app
