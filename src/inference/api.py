@@ -11,6 +11,13 @@ Endpoints:
     GET  /metrics             - Prometheus metrics (for Grafana)
 """
 
+# import debugpy
+# debugpy.listen(("0.0.0.0", 5678))
+# print("Waiting for debugger attach...")
+# debugpy.wait_for_client()
+# print("Debugger attached")
+
+
 import logging
 import os
 import time
@@ -18,15 +25,17 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, Request
 from pydantic import BaseModel
 
 from src.inference.predictor import BiochargePredictor
 
+# import pdb; pdb.set_trace()
+
 logger = logging.getLogger(__name__)
 
 # Global predictor instance
-predictor: BiochargePredictor | None = None
+# predictor: BiochargePredictor | None = None
 
 # Simple metrics counters (no prometheus_client dependency needed)
 _metrics = {
@@ -39,7 +48,6 @@ _metrics = {
     "autoregressive_latency_sum": 0.0,
     "autoregressive_latency_count": 0,
 }
-
 # Default paths (overridable via env vars or request body)
 DEFAULT_DATA_DIR = os.environ.get(
     "BIOCHARGE_DATA_DIR",
@@ -58,27 +66,38 @@ DEFAULT_ZSCORES_FILE = os.environ.get(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load model on startup."""
-    global predictor
+    print("Lifespan startup: attempting to load model...")  # DEBUG
 
     checkpoint_dir = os.environ.get("MODEL_CHECKPOINT_DIR")
     mlflow_uri = os.environ.get("MLFLOW_MODEL_URI")
 
+    predictor = None
     if checkpoint_dir:
+        print(f"MODEL_CHECKPOINT_DIR set: {checkpoint_dir}")  # DEBUG
         try:
             predictor = BiochargePredictor(checkpoint_dir=checkpoint_dir)
+            print("Model loaded successfully.")  # DEBUG
         except Exception as e:
             logger.error("Failed to load model from %s: %s", checkpoint_dir, e)
+            print(f"Failed to load model from {checkpoint_dir}: {e}")  # DEBUG
     elif mlflow_uri:
+        print(f"MLFLOW_MODEL_URI set: {mlflow_uri}")  # DEBUG
         try:
             predictor = BiochargePredictor(mlflow_model_uri=mlflow_uri)
+            print("Model loaded successfully from MLflow.")  # DEBUG
         except Exception as e:
             logger.error("Failed to load model from MLflow %s: %s", mlflow_uri, e)
+            print(f"Failed to load model from MLflow {mlflow_uri}: {e}")  # DEBUG
     else:
         logger.warning("No model configured. Set MODEL_CHECKPOINT_DIR or MLFLOW_MODEL_URI.")
+        print("No model configured. Set MODEL_CHECKPOINT_DIR or MLFLOW_MODEL_URI.")  # DEBUG
+
+    app.state.predictor = predictor
 
     yield
 
-    predictor = None
+    app.state.predictor = None
+    print("Lifespan shutdown: predictor set to None.")  # DEBUG
 
 
 app = FastAPI(
@@ -142,15 +161,21 @@ class ModelInfo(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
-async def health():
+async def health(request: Request):
+    # breakpoint()
+    predictor = request.app.state.predictor
+    print(f"/health called, predictor is: {predictor}", flush = True)  # DEBUG
+    # breakpoint()
     return {
         "status": "healthy",
-        "model_loaded": predictor is not None,
+        "model_loaded": predictor is not None
     }
 
 
 @app.post("/predict", response_model=PredictResponse)
-async def predict(request: PredictRequest):
+async def predict(request: PredictRequest, fastapi_request: Request):
+    breakpoint()
+    predictor = fastapi_request.app.state.predictor
     if predictor is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -168,7 +193,8 @@ async def predict(request: PredictRequest):
 
 
 @app.post("/batch", response_model=BatchPredictResponse)
-async def batch_predict(request: BatchPredictRequest):
+async def batch_predict(request: BatchPredictRequest, fastapi_request: Request):
+    predictor = fastapi_request.app.state.predictor
     if predictor is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -186,8 +212,7 @@ async def batch_predict(request: BatchPredictRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _run_autoregressive(request: AutoregressiveRequest) -> dict:
-    """Shared logic for the two autoregressive endpoints."""
+def _run_autoregressive(request: AutoregressiveRequest, predictor):
     if predictor is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -205,11 +230,11 @@ def _run_autoregressive(request: AutoregressiveRequest) -> dict:
 
 
 @app.post("/autoregressive", response_model=AutoregressiveResponse)
-async def autoregressive(request: AutoregressiveRequest):
-    """Run full autoregressive inference for a user and date(s)."""
+async def autoregressive(request: AutoregressiveRequest, fastapi_request: Request):
+    predictor = fastapi_request.app.state.predictor
     start = time.time()
     try:
-        results = _run_autoregressive(request)
+        results = _run_autoregressive(request, predictor)
         _metrics["autoregressive_predictions_total"] += 1
         _metrics["autoregressive_latency_sum"] += time.time() - start
         _metrics["autoregressive_latency_count"] += 1
@@ -225,11 +250,11 @@ async def autoregressive(request: AutoregressiveRequest):
 
 
 @app.post("/autoregressive/plot")
-async def autoregressive_plot(request: AutoregressiveRequest):
-    """Run autoregressive inference and return a PNG plot."""
+async def autoregressive_plot(request: AutoregressiveRequest, fastapi_request: Request):
+    predictor = fastapi_request.app.state.predictor
     start = time.time()
     try:
-        results = _run_autoregressive(request)
+        results = _run_autoregressive(request, predictor)
         png_bytes = BiochargePredictor.generate_plot(
             preds=results["preds"],
             targets=results["targets"],
@@ -250,7 +275,8 @@ async def autoregressive_plot(request: AutoregressiveRequest):
 
 
 @app.get("/model-info", response_model=ModelInfo)
-async def model_info():
+async def model_info(request: Request):
+    predictor = request.app.state.predictor
     if predictor is None:
         return ModelInfo(status="not_loaded", model_type="none", device="none", config={})
     return ModelInfo(
@@ -262,7 +288,11 @@ async def model_info():
 
 
 @app.get("/metrics")
-async def metrics():
+async def metrics(request: Request):
+    predictor = request.app.state.predictor
+    if predictor is None:
+        return {"error": "Model not loaded"}
+
     """Prometheus-format metrics endpoint for Grafana scraping."""
     avg_latency = (
         _metrics["prediction_latency_sum"] / _metrics["prediction_latency_count"]
