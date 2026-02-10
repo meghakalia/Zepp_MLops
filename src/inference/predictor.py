@@ -289,6 +289,8 @@ class BiochargePredictor:
         self.model.eval()
         self.model.to(self.device)
 
+        self.custom_scaling = True
+
     def _load_config(self, checkpoint_dir: str) -> dict:
         config_path = os.path.join(checkpoint_dir, "model_config.json")
         with open(config_path) as f:
@@ -384,14 +386,19 @@ class BiochargePredictor:
                     yhat, _ = model_output
                 else:
                     yhat = model_output
+                
+                if not self.custom_scaling:
+                    if torch.isnan(yhat).any() or torch.isinf(yhat).any():
+                        logger.warning("Model produced NaN/Inf at step %d, using 0", i)
+                        delta_pred = 0.0
+                    else:
+                        delta_pred = yhat.cpu().item() * 0.01
 
-                if torch.isnan(yhat).any() or torch.isinf(yhat).any():
-                    logger.warning("Model produced NaN/Inf at step %d, using 0", i)
-                    delta_pred = 0.0
+                    delta_target = y_in.cpu().item() * 0.01
                 else:
-                    delta_pred = yhat.cpu().item() * 0.01
+                    delta_pred = (1.1 * (yhat.cpu().item() + 1) / 2 - 0.4) / 100
+                    delta_target = (1.1 * (y.cpu().item() + 1) / 2 - 0.4) / 100
 
-                delta_target = y_in.cpu().item() * 0.01
 
                 mask = sample.get("mask", torch.tensor([1.0]))
                 if mask.item() < 0.5:
