@@ -337,7 +337,7 @@ def resolve_timezone(tz_value, user_id):
 
 
 def get_dynamic_data(userId, fromDate, toDate, token):
-    headers = {'content-type': 'application/json', 'apptoken': supertoken, 'appname': 'com.xiaomi.hm.health'}
+    headers = {'content-type': 'application/json', 'apptoken': token, 'appname': 'com.xiaomi.hm.health'}
     params = {'userId': userId, 'fromDate': fromDate, 'toDate': toDate, 'appName': 'com.xiaomi.hm.health'}
     urls = {
         'cn2': ['https://mifit-health-data-private-cn3.zepp.com/admin/user/originalData/'],
@@ -847,7 +847,7 @@ def fetch_all_data_for_period(userid, fromDate, toDate, supertoken, token, raw_d
 # SECTION 4: DATA PROCESSING
 # ==============================================================================
 
-def process_fetched_data(userid, fetched_data, user_score_data_path, user_sleep_data_path):
+def process_fetched_data(userid, fetched_data, user_score_data_path, user_sleep_data_path, processing_mode='ONLINE'):
     print(f"[{userid}] Starting data processing.")
     dynamic_df, basic_info, exercise_df, readiness_df, exertion_df, stress_df, charge_wake_df = (fetched_data[k] for k in ["dynamic_df", "basic_info", "exercise_df", "readiness_df", "exertion_df", "stress_df", "charge_wake_df"])
     
@@ -903,7 +903,7 @@ def process_fetched_data(userid, fetched_data, user_score_data_path, user_sleep_
     scores_df_copy['date_str'] = pd.to_datetime(scores_df_copy['date']).dt.strftime('%Y-%m-%d')
     
     dynamic_df = dynamic_df[dynamic_df['summary'] != {}]
-    if PROCESSING_MODE == 'OFFLINE':
+    if processing_mode == 'OFFLINE':
         import ast
         for col in ['hr', 'mode', 'active', 'step']:
             dynamic_df[col] = dynamic_df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
@@ -1198,7 +1198,7 @@ def run_user_pipeline(userid, fromDate, toDate, supertoken, token, user_score_da
         return
 
     if fetched_data:
-        process_fetched_data(userid, fetched_data, user_score_data_path, user_sleep_data_path)
+        process_fetched_data(userid, fetched_data, user_score_data_path, user_sleep_data_path, processing_mode=mode)
     print(f"--- Pipeline for user {userid} finished in {time.time() - start_time:.2f} seconds ---")
 
 

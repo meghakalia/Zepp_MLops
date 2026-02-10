@@ -10,6 +10,9 @@ Wraps the standalone copy of pull_biocharge_data.py with:
 import os
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from src.data_ingestion.pull_biocharge_data import (
     fetch_all_data_for_period,
@@ -18,8 +21,6 @@ from src.data_ingestion.pull_biocharge_data import (
 )
 
 logger = logging.getLogger(__name__)
-
-
 def get_tokens() -> tuple[str, str]:
     """Read API tokens from environment variables."""
     supertoken = os.environ.get("XIAOMI_SUPERTOKEN")
