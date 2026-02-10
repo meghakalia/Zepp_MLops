@@ -334,8 +334,8 @@ async def fresh_inference(request: FreshInferenceRequest, fastapi_request: Reque
             pull_mode=request.pull_mode,
             skip_pull=request.skip_pull,
             skip_ground_truth=request.skip_ground_truth,
-            plot=request.plot,
-            predictor=predictor,
+            plot=request.plot
+            # predictor=predictor
         )
         elapsed = time.time() - start
         _metrics["fresh_inference_total"] += 1

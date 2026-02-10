@@ -27,12 +27,7 @@ import logging
 import os
 import shutil
 import tempfile
-import time
 from datetime import datetime, timedelta
-
-from src.data_ingestion.puller import pull_user_data
-from src.inference.charge_analytics import compute_biocharge_ground_truth
-from src.inference.predictor import BiochargePredictor
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +69,6 @@ def run_fresh_inference(
     skip_ground_truth: bool = False,
     plot: bool = False,
     output_dir: str = "outputs",
-    predictor: "BiochargePredictor | None" = None,
 ) -> dict:
     """
     End-to-end fresh data inference pipeline.
@@ -98,32 +92,36 @@ def run_fresh_inference(
                            (assume {user_id}_processed.xlsx already exists in data_dir)
         plot: If True, save a PNG plot of predicted vs actual
         output_dir: Directory for plot output
-        predictor: Optional pre-loaded BiochargePredictor instance (avoids reloading model)
 
     Returns:
         dict with keys: user_id, dates, num_samples, preds, targets,
                         mae, mse, rmse, pred_range, target_range,
-                        processed_excel_path, timings, total_seconds,
-                        stages_completed, plot_path (if plot=True)
+                        processed_excel_path, plot_path (if plot=True)
     """
+    # from src.data_ingestion.puller import pull_user_data
+    # from src.inference.charge_analytics import compute_biocharge_ground_truth
+    # from src.inference.predictor import BiochargePredictor
+
+    # ------debug --------
+    import sys
+    sys.path.insert(0, '/Users/megha/Documents/Repos/biocharge-mlops')
+    from src.data_ingestion.puller import pull_user_data
+    from charge_analytics import compute_biocharge_ground_truth
+    from predictor import BiochargePredictor
+    # ------debug --------
+
     user_id = str(user_id)
     temp_dir = tempfile.mkdtemp(prefix="biocharge_fresh_")
-    timings = {}
-    stages_completed = []
 
     try:
         # ---- Stage 1: Pull fresh data ----
-        logger.info("=" * 60)
-        logger.info("STAGE 1: Data Pull")
-        logger.info("=" * 60)
-        t0 = time.time()
+        print(f"\n{'='*60}")
+        print(f"STAGE 1: Data Pull")
+        print(f"{'='*60}")
         if skip_pull:
-            logger.info("Skipping data pull (--skip_pull)")
+            print("Skipping data pull (--skip_pull)")
         else:
-            logger.info(
-                "Pulling data for user %s from %s to %s (mode=%s)",
-                user_id, from_date, to_date, pull_mode,
-            )
+            print(f"Pulling data for user {user_id} from {from_date} to {to_date} (mode={pull_mode})")
             pull_result = pull_user_data(
                 userid=user_id,
                 from_date=from_date,
@@ -136,9 +134,7 @@ def run_fresh_inference(
                     f"Data pull returned no data for user {user_id} "
                     f"({from_date} to {to_date}). Check API tokens and user ID."
                 )
-            logger.info("Data pull complete.")
-        timings["data_pull_seconds"] = time.time() - t0
-        stages_completed.append("pull")
+            print(f"Data pull complete.")
 
         # data_folder is what charge_old expects: parent of user_score_data/ and user_sleep_data/
         raw_data_folder = os.path.join(data_dir, "raw")
@@ -156,14 +152,13 @@ def run_fresh_inference(
                 f"Sleep data directory not found: {sleep_dir}\n"
                 f"Ensure data was pulled successfully or check data_dir ({data_dir})."
             )
-        logger.info("  Score data: %s", score_file)
-        logger.info("  Sleep data: %s", sleep_dir)
+        print(f"  Score data: {score_file}")
+        print(f"  Sleep data: {sleep_dir}")
 
         # ---- Stage 2: Compute biocharge ground truth ----
-        logger.info("=" * 60)
-        logger.info("STAGE 2: Biocharge Ground Truth Computation")
-        logger.info("=" * 60)
-        t0 = time.time()
+        print(f"\n{'='*60}")
+        print(f"STAGE 2: Biocharge Ground Truth Computation")
+        print(f"{'='*60}")
 
         if skip_ground_truth:
             # Expect processed Excel already in data_dir
@@ -173,58 +168,48 @@ def run_fresh_inference(
                 raise FileNotFoundError(
                     f"--skip_ground_truth set but processed file not found: {processed_excel}"
                 )
-            logger.info("Skipping ground truth (--skip_ground_truth), using: %s", processed_excel)
+            print(f"Skipping ground truth (--skip_ground_truth), using: {processed_excel}")
         else:
             result_path = os.path.join(temp_dir, "processed")
-            logger.info("Computing biocharge analytical values for user %s...", user_id)
+            print(f"Computing biocharge analytical values for user {user_id}...")
             processed_excel = compute_biocharge_ground_truth(
                 user_id=user_id,
                 data_folder=raw_data_folder,
                 result_path=result_path,
             )
-            logger.info("Ground truth saved: %s", processed_excel)
-        timings["ground_truth_seconds"] = time.time() - t0
-        stages_completed.append("ground_truth")
+            print(f"Ground truth saved: {processed_excel}")
 
         # Validate columns
         missing_cols = _validate_processed_columns(processed_excel)
         if missing_cols:
-            logger.warning(
-                "Processed Excel is missing %d expected columns: %s",
-                len(missing_cols), missing_cols,
-            )
+            print(f"  WARNING: Processed Excel is missing {len(missing_cols)} expected columns:")
+            for col in missing_cols:
+                print(f"    - {col}")
         else:
-            logger.info("All required inference columns present.")
+            print(f"  All required inference columns present.")
 
         # ---- Stage 3: Run inference ----
-        logger.info("=" * 60)
-        logger.info("STAGE 3: ML Inference")
-        logger.info("=" * 60)
-        t0 = time.time()
+        print(f"\n{'='*60}")
+        print(f"STAGE 3: ML Inference")
+        print(f"{'='*60}")
         dates = _generate_date_list(from_date, to_date)
-        logger.info("Running autoregressive inference for %d dates...", len(dates))
+        print(f"Running autoregressive inference for {len(dates)} dates...")
 
-        if predictor is None:
-            predictor = BiochargePredictor(checkpoint_dir=model_dir)
+        predictor = BiochargePredictor(checkpoint_dir=model_dir)
         results = predictor.run_inference_for_user(
             user_id=user_id,
             dates=dates,
             data_dir=result_path,  # directory containing {user_id}_processed.xlsx
             zscores_file=zscores_file,
         )
-        timings["inference_seconds"] = time.time() - t0
-        stages_completed.append("inference")
 
         results["processed_excel_path"] = processed_excel
-        results["timings"] = timings
-        results["total_seconds"] = sum(timings.values())
-        results["stages_completed"] = stages_completed
 
         # ---- Stage 4: Optional plot ----
         if plot:
-            logger.info("=" * 60)
-            logger.info("STAGE 4: Plot")
-            logger.info("=" * 60)
+            print(f"\n{'='*60}")
+            print(f"STAGE 4: Plot")
+            print(f"{'='*60}")
             try:
                 date_str = f"{from_date}_to_{to_date}"
                 plot_path = os.path.join(output_dir, f"fresh_inference_{user_id}_{date_str}.png")
@@ -241,28 +226,22 @@ def run_fresh_inference(
                     with open(plot_path, "wb") as f:
                         f.write(png_bytes)
                     results["plot_path"] = plot_path
-                    stages_completed.append("plot")
-                    logger.info("Plot saved: %s", plot_path)
+                    print(f"Plot saved: {plot_path}")
             except Exception as e:
-                logger.warning("Plot generation failed: %s", e)
+                print(f"Warning: Plot generation failed: {e}")
 
         # ---- Summary ----
-        logger.info("=" * 60)
-        logger.info("RESULTS")
-        logger.info("=" * 60)
-        logger.info("User: %s", results["user_id"])
-        logger.info("Dates: %s", results["dates"])
-        logger.info("Samples: %s", results["num_samples"])
-        logger.info("MAE: %.4f", results["mae"])
-        logger.info("MSE: %.4f", results["mse"])
-        logger.info("RMSE: %.4f", results["rmse"])
-        logger.info("Pred range: %s", results["pred_range"])
-        logger.info("Target range: %s", results["target_range"])
-        logger.info("Total time: %.2fs (pull=%.2fs, gt=%.2fs, inference=%.2fs)",
-                     results["total_seconds"],
-                     timings.get("data_pull_seconds", 0),
-                     timings.get("ground_truth_seconds", 0),
-                     timings.get("inference_seconds", 0))
+        print(f"\n{'='*60}")
+        print(f"RESULTS")
+        print(f"{'='*60}")
+        print(f"User: {results['user_id']}")
+        print(f"Dates: {results['dates']}")
+        print(f"Samples: {results['num_samples']}")
+        print(f"MAE: {results['mae']:.4f}")
+        print(f"MSE: {results['mse']:.4f}")
+        print(f"RMSE: {results['rmse']:.4f}")
+        print(f"Pred range: {results['pred_range']}")
+        print(f"Target range: {results['target_range']}")
 
         return results
 
