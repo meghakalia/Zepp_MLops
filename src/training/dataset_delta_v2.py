@@ -4766,14 +4766,23 @@ class TorchBiochargeDataset(Dataset):
             # if idx > 1500:
             #     mask = 0.0
 
+            # Delta scaling depends on normalization type
+            if self.normalization_type == "max":
+                # Normalize delta to [-1, 1] range using min=-0.4, max=0.7
+                y = 2 * ((torch.tensor([charge_delta * 100], dtype=torch.float32) - (-0.4)) / (0.7 - (-0.4))) - 1
+                y_add_1_t = 2 * ((torch.tensor([y_add_1 * 100], dtype=torch.float32) - (-0.4)) / (0.7 - (-0.4))) - 1
+            else:
+                y = torch.tensor([charge_delta * 100], dtype=torch.float32)
+                y_add_1_t = torch.tensor([y_add_1 * 100], dtype=torch.float32)
+
             return {
                 "x": torch.from_numpy(x).float(),
-                "y": torch.tensor([charge_delta * 100], dtype=torch.float32),  # DELTA scaled
+                "y": y,  # DELTA scaled
                 "mask": torch.tensor([mask], dtype=torch.float32),
                 'meta': {'user_id': user_id, 'date': date_str, 'idx': idx},
-                'charge_recon': charge_recon, 
+                'charge_recon': charge_recon,
                 "x_add_1": torch.from_numpy(x_add_1).float(),
-                "y_add_1": torch.tensor([y_add_1*100], dtype=torch.float32)
+                "y_add_1": y_add_1_t
             }
 
         except Exception as e:
@@ -4787,7 +4796,7 @@ class TorchBiochargeDataset(Dataset):
                 "y": torch.tensor([0.0], dtype=torch.float32),
                 "mask": torch.tensor([0.0], dtype=torch.float32),
                 "x_add_1": torch.from_numpy(x_add_1).float(),
-                "y_add_1": torch.tensor([-6.0*100], dtype=torch.float32)
+                "y_add_1": torch.tensor([-6.0 * 100], dtype=torch.float32)
             }
 
     def get_feature_list(self) -> List:
@@ -5004,11 +5013,16 @@ class TorchBiochargeDataset(Dataset):
 
         # TIMESERIES features with z-score normalization
         for col in self.cfg.ts_cols:
+            # Fallback: if config says hr_filtered but data only has hr, use hr
+            lookup_col = col
             if col not in column_to_idx:
-                feats.append(0.0)
-                continue
+                if 'hr_filtered' in col.lower() and 'timeseries.hr' in column_to_idx:
+                    lookup_col = 'timeseries.hr'
+                else:
+                    feats.append(0.0)
+                    continue
 
-            col_idx = column_to_idx[col]
+            col_idx = column_to_idx[lookup_col]
             col_data = features_data[col_idx][date_idx]
 
             # Extract value at idx
@@ -5017,7 +5031,7 @@ class TorchBiochargeDataset(Dataset):
             else:
                 raw_val = 0.0
 
-            # stress 
+            # stress
             if 'timeseries.full_stress_list' in col.lower():
                 val = raw_val
                 feats.append(val if not np.isnan(val) and not np.isinf(val) else -6.0)
@@ -5030,7 +5044,7 @@ class TorchBiochargeDataset(Dataset):
             if "timeseries.nap_state" in col.lower():
                 self.nap_state = raw_val # either 0 / 1
 
-            # Special handling for sleep_stage
+            # Special handling for sleep_stage (biocharge logic: {4:2, 8:1, 5:0} → deep=0, REM=1, light=2)
             if 'sleep_stage' in col.lower():
                 val = raw_val / 3.0  # Normalize to 0-1
                 feats.append(val)
@@ -5046,14 +5060,19 @@ class TorchBiochargeDataset(Dataset):
                 raw_val = raw_val / 100.0  # Normalize HRR raw
                 feats.append(raw_val)
                 continue
-            
-            if self.normalization_type == "max": 
+
+            if self.normalization_type == "max":
                 if 'acc' in col.lower():
-                    raw_val = raw_val / 150  # Normalize ACC with population max 
+                    if raw_val > 150:
+                        raw_val = -6.0  # missing
+                    else:
+                        raw_val = raw_val / 150  # Normalize ACC with population max
 
-
-                if 'timeseries.hr_filtered' in col.lower():
-                    raw_val = raw_val /240  # Normalize HR filtered
+                if 'hr_filtered' in col.lower() or (lookup_col == 'timeseries.hr' and 'hr_filtered' in col.lower()):
+                    if raw_val > 240:
+                        raw_val = -6.0  # missing
+                    else:
+                        raw_val = raw_val / 240  # Normalize HR filtered
 
                 val = raw_val
                 

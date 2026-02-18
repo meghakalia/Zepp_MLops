@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/megha/Documents/Repos/biocharge-mlops log --oneline --all)",
+      "Bash(wc:*)",
+      "Bash(python -m src.inference.fresh_inference:*)",
+      "Bash(python:*)"
+    ]
+  }
+}

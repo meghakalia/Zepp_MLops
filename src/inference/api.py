@@ -50,6 +50,19 @@ _metrics = {
     "last_fresh_data_pull_seconds": 0.0,
     "last_fresh_ground_truth_seconds": 0.0,
     "last_fresh_inference_seconds": 0.0,
+    # Region-based error metrics
+    "last_exercise_mae": float("nan"),
+    "last_exercise_mse": float("nan"),
+    "last_sleep_mae": float("nan"),
+    "last_sleep_mse": float("nan"),
+    "last_nap_mae": float("nan"),
+    "last_nap_mse": float("nan"),
+    "last_nonwear_mae": float("nan"),
+    "last_nonwear_mse": float("nan"),
+    "last_overall_traj_mae": float("nan"),
+    "last_overall_traj_mse": float("nan"),
+    "last_day_start_mae": float("nan"),
+    "last_day_end_mae": float("nan"),
 }
 # Default paths (overridable via env vars or request body)
 DEFAULT_DATA_DIR = os.environ.get(
@@ -106,8 +119,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Biocharge Prediction API",
-    description="MLP_delta model serving for biocharge delta predictions",
-    version="0.3.0",
+    description="Dual-head model serving for biocharge delta predictions",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -178,9 +191,10 @@ class FreshInferenceResponse(BaseModel):
     pred_range: list[float]
     target_range: list[float]
     processed_excel_path: str
-    timings: dict
-    total_seconds: float
-    stages_completed: list[str]
+    timings: dict = {}
+    total_seconds: float = 0.0
+    stages_completed: list[str] = []
+    region_errors: dict = {}
 
 
 class ModelInfo(BaseModel):
@@ -349,6 +363,22 @@ async def fresh_inference(request: FreshInferenceRequest, fastapi_request: Reque
             _metrics["last_fresh_ground_truth_seconds"] = results["timings"].get("ground_truth_seconds", 0)
             _metrics["last_fresh_inference_seconds"] = results["timings"].get("inference_seconds", 0)
 
+        # Capture region-based error metrics
+        region_errors = results.get("region_errors", {})
+        if region_errors:
+            _metrics["last_exercise_mae"] = region_errors.get("exercise_mae", float("nan"))
+            _metrics["last_exercise_mse"] = region_errors.get("exercise_mse", float("nan"))
+            _metrics["last_sleep_mae"] = region_errors.get("sleep_mae", float("nan"))
+            _metrics["last_sleep_mse"] = region_errors.get("sleep_mse", float("nan"))
+            _metrics["last_nap_mae"] = region_errors.get("nap_mae", float("nan"))
+            _metrics["last_nap_mse"] = region_errors.get("nap_mse", float("nan"))
+            _metrics["last_nonwear_mae"] = region_errors.get("non_wear_mae", float("nan"))
+            _metrics["last_nonwear_mse"] = region_errors.get("non_wear_mse", float("nan"))
+            _metrics["last_overall_traj_mae"] = region_errors.get("overall_traj_mae", float("nan"))
+            _metrics["last_overall_traj_mse"] = region_errors.get("overall_traj_mse", float("nan"))
+            _metrics["last_day_start_mae"] = region_errors.get("day_start_mae", float("nan"))
+            _metrics["last_day_end_mae"] = region_errors.get("day_end_mae", float("nan"))
+
         return FreshInferenceResponse(**{
             k: results[k]
             for k in FreshInferenceResponse.model_fields
@@ -362,8 +392,9 @@ async def fresh_inference(request: FreshInferenceRequest, fastapi_request: Reque
 
 @app.post("/fresh-inference/plot")
 async def fresh_inference_plot(request: FreshInferenceRequest, fastapi_request: Request):
-    """Same as /fresh-inference but returns a PNG plot."""
+    """Same as /fresh-inference but returns a PNG trajectory plot with event annotations."""
     from src.inference.fresh_inference import run_fresh_inference
+    from src.inference.plotting import generate_trajectory_plot
 
     predictor = fastapi_request.app.state.predictor
     if predictor is None:
@@ -381,21 +412,49 @@ async def fresh_inference_plot(request: FreshInferenceRequest, fastapi_request: 
             skip_pull=request.skip_pull,
             skip_ground_truth=request.skip_ground_truth,
             plot=False,
-            predictor=predictor,
         )
-        png_bytes = BiochargePredictor.generate_plot(
+
+        # Generate trajectory plot with event annotations
+        from src.inference.fresh_inference import _generate_date_list
+        dates = _generate_date_list(request.from_date, request.to_date)
+        data_dir = results.get("processed_excel_path", "")
+        if data_dir:
+            data_dir = os.path.dirname(data_dir)
+
+        png_bytes = generate_trajectory_plot(
             preds=results["preds"],
             targets=results["targets"],
-            user_id=results["user_id"],
-            dates=results["dates"],
-            mae=results["mae"],
-            mse=results["mse"],
+            user_id=request.user_id,
+            dates=dates,
+            data_dir=data_dir,
+            error_dict=results.get("region_errors", {}),
         )
+
         _metrics["fresh_inference_total"] += 1
+        _metrics["last_fresh_inference_mae"] = results["mae"]
+        _metrics["last_fresh_inference_rmse"] = results["rmse"]
+        _metrics["last_fresh_inference_mse"] = results["mse"]
         if "timings" in results:
             _metrics["last_fresh_data_pull_seconds"] = results["timings"].get("data_pull_seconds", 0)
             _metrics["last_fresh_ground_truth_seconds"] = results["timings"].get("ground_truth_seconds", 0)
             _metrics["last_fresh_inference_seconds"] = results["timings"].get("inference_seconds", 0)
+
+        # Capture region errors for metrics
+        region_errors = results.get("region_errors", {})
+        if region_errors:
+            _metrics["last_exercise_mae"] = region_errors.get("exercise_mae", float("nan"))
+            _metrics["last_exercise_mse"] = region_errors.get("exercise_mse", float("nan"))
+            _metrics["last_sleep_mae"] = region_errors.get("sleep_mae", float("nan"))
+            _metrics["last_sleep_mse"] = region_errors.get("sleep_mse", float("nan"))
+            _metrics["last_nap_mae"] = region_errors.get("nap_mae", float("nan"))
+            _metrics["last_nap_mse"] = region_errors.get("nap_mse", float("nan"))
+            _metrics["last_nonwear_mae"] = region_errors.get("non_wear_mae", float("nan"))
+            _metrics["last_nonwear_mse"] = region_errors.get("non_wear_mse", float("nan"))
+            _metrics["last_overall_traj_mae"] = region_errors.get("overall_traj_mae", float("nan"))
+            _metrics["last_overall_traj_mse"] = region_errors.get("overall_traj_mse", float("nan"))
+            _metrics["last_day_start_mae"] = region_errors.get("day_start_mae", float("nan"))
+            _metrics["last_day_end_mae"] = region_errors.get("day_end_mae", float("nan"))
+
         return Response(content=png_bytes, media_type="image/png")
     except HTTPException:
         raise
@@ -409,9 +468,10 @@ async def model_info(request: Request):
     predictor = request.app.state.predictor
     if predictor is None:
         return ModelInfo(status="not_loaded", model_type="none", device="none", config={})
+    model_type = predictor.config.get("model_type", "mlp_delta")
     return ModelInfo(
         status="loaded",
-        model_type="mlp_delta",
+        model_type=model_type,
         device=str(predictor.device),
         config=predictor.config,
     )
@@ -517,4 +577,29 @@ async def metrics(request: Request):
         f'biocharge_fresh_ml_inference_seconds {_metrics["last_fresh_inference_seconds"]:.6f}',
         "",
     ]
+
+    # Region-based error metrics (only emit if not NaN)
+    region_metrics = [
+        ("biocharge_exercise_mae", "Last exercise region MAE", "last_exercise_mae"),
+        ("biocharge_exercise_mse", "Last exercise region MSE", "last_exercise_mse"),
+        ("biocharge_sleep_mae", "Last sleep region MAE", "last_sleep_mae"),
+        ("biocharge_sleep_mse", "Last sleep region MSE", "last_sleep_mse"),
+        ("biocharge_nap_mae", "Last nap region MAE", "last_nap_mae"),
+        ("biocharge_nap_mse", "Last nap region MSE", "last_nap_mse"),
+        ("biocharge_nonwear_mae", "Last non-wear region MAE", "last_nonwear_mae"),
+        ("biocharge_nonwear_mse", "Last non-wear region MSE", "last_nonwear_mse"),
+        ("biocharge_overall_traj_mae", "Last overall trajectory MAE", "last_overall_traj_mae"),
+        ("biocharge_overall_traj_mse", "Last overall trajectory MSE", "last_overall_traj_mse"),
+        ("biocharge_day_start_mae", "Last day-start boundary MAE", "last_day_start_mae"),
+        ("biocharge_day_end_mae", "Last day-end boundary MAE", "last_day_end_mae"),
+    ]
+    for metric_name, help_text, key in region_metrics:
+        val = _metrics[key]
+        if not (isinstance(val, float) and val != val):  # skip NaN
+            lines.extend([
+                f"# HELP {metric_name} {help_text}",
+                f"# TYPE {metric_name} gauge",
+                f"{metric_name} {val:.6f}",
+                "",
+            ])
     return Response(content="\n".join(lines), media_type="text/plain")

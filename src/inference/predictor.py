@@ -1,9 +1,9 @@
 """
 Model loading and prediction for inference.
 
-Loads a trained MLP_delta model from a checkpoint directory or MLflow
-model registry and runs predictions — including full autoregressive
-inference matching the run_inference.py pipeline.
+Loads a trained model (MLP_delta or GatedDualHeadMLP) from a checkpoint
+directory or MLflow model registry and runs predictions — including full
+autoregressive inference with region-based error computation.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import torch
 
 import mlflow.pytorch
 
-from src.training.model import MLP_delta
+from src.training.model import MLP_delta, GatedDualHeadMLP
 from src.training.dataset_delta_v2 import DatasetConfig, TorchBiochargeDataset
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ COLUMNS_TO_READ = [
     "charge.timeseries",
     "timeseries.hr_available",
     "timeseries.hr_available_5",
+    "timeseries.hr",  # fallback for hr_filtered
 ]
 
 
@@ -105,6 +106,21 @@ def excel_to_pt(user_id, data_dir, output_dir):
         all_features_data.append(col_data)
 
     column_to_idx = {name: idx for idx, name in enumerate(feature_names)}
+
+    # If hr_filtered data is empty/zeros but hr data exists, alias it
+    if "timeseries.hr_filtered" in column_to_idx and "timeseries.hr" in column_to_idx:
+        hr_filtered_idx = column_to_idx["timeseries.hr_filtered"]
+        hr_idx = column_to_idx["timeseries.hr"]
+        # Check if hr_filtered is all zeros/empty
+        hr_filtered_data = all_features_data[hr_filtered_idx]
+        has_hr_filtered = any(
+            isinstance(d, (list, tuple)) and len(d) > 0
+            for d in hr_filtered_data
+        )
+        if not has_hr_filtered:
+            # Copy hr data into hr_filtered slot
+            all_features_data[hr_filtered_idx] = all_features_data[hr_idx]
+            logger.info("Mapped timeseries.hr -> timeseries.hr_filtered (no hr_filtered data found)")
 
     string_cols = df_subset.select_dtypes(include=["object", "string"]).columns
     string_data = {}
@@ -258,11 +274,190 @@ def create_inference_config(model_config_path, temp_pt_dir, temp_index_csv, zsco
 
 
 # ---------------------------------------------------------------------------
+# Region-based error helpers
+# ---------------------------------------------------------------------------
+
+def find_transition_events_by_type(user_id, dates, data_dir):
+    """
+    Find start/end indices of physiological events (exercise, sleep, nap, non-wear)
+    across multiple days, returning indices in the concatenated timeseries.
+
+    Returns:
+        dict: {event_type: {'start': [...], 'end': [...]}}
+    """
+    user_file = os.path.join(data_dir, f"{user_id}_processed.xlsx")
+    if not os.path.exists(user_file):
+        return {}
+
+    df = pd.read_excel(user_file)
+    event_cols = {
+        'exercise': 'timeseries.exercise',
+        'sleep': 'timeseries.sleep_markers',
+        'nap': 'timeseries.nap_state',
+        'non_wear': 'timeseries.min_status_list',
+    }
+    active_values = {
+        'exercise': {1},
+        'sleep': {1},
+        'nap': {1},
+        'non_wear': {3},
+    }
+
+    result = {etype: {'start': [], 'end': []} for etype in event_cols}
+    cumulative_offset = 0
+
+    for date_str in dates:
+        df_row = df[df['date'] == date_str]
+        if df_row.empty:
+            continue
+
+        for etype, col_name in event_cols.items():
+            try:
+                series = safe_parse(df_row.iloc[0].get(col_name, '[]'))
+            except Exception:
+                series = []
+            if not series:
+                continue
+
+            active_set = active_values[etype]
+            in_interval = False
+            start_idx = None
+
+            for i, val in enumerate(series):
+                is_active = val in active_set
+                if is_active and not in_interval:
+                    start_idx = i
+                    in_interval = True
+                elif not is_active and in_interval:
+                    result[etype]['start'].append(start_idx + cumulative_offset)
+                    result[etype]['end'].append(i - 1 + cumulative_offset)
+                    in_interval = False
+
+            if in_interval and start_idx is not None:
+                result[etype]['start'].append(start_idx + cumulative_offset)
+                result[etype]['end'].append(len(series) - 1 + cumulative_offset)
+
+        # Get day length from charge timeseries
+        try:
+            charge = safe_parse(df_row.iloc[0].get('charge.timeseries', '[]'))
+            cumulative_offset += len(charge)
+        except Exception:
+            cumulative_offset += 1440  # default day length
+
+    return result
+
+
+def calculate_region_errors(preds, targets, meta_dict, data_dir):
+    """
+    Compute region-based autoregressive errors.
+
+    Returns:
+        dict with keys like exercise_mae, sleep_mse, overall_traj_mae, etc.
+    """
+    if not meta_dict:
+        return {}
+
+    user_id = list(meta_dict.keys())[0]
+    dates = sorted(list(meta_dict[user_id]))
+
+    # Find event transitions
+    events = find_transition_events_by_type(user_id, dates, data_dir)
+
+    np_preds = np.array(preds, dtype=np.float64)
+    np_targets = np.array(targets, dtype=np.float64)
+    min_len = min(len(np_preds), len(np_targets))
+
+    error_dict = {}
+
+    # Region-based errors
+    for event_type, intervals in events.items():
+        traj_errors = []
+        start_end_errors = []
+
+        for start_idx, end_idx in zip(intervals.get('start', []), intervals.get('end', [])):
+            if start_idx >= min_len or end_idx >= min_len or start_idx > end_idx:
+                continue
+
+            seg_p = np_preds[start_idx:end_idx + 1]
+            seg_t = np_targets[start_idx:end_idx + 1]
+            traj_errors.append(seg_p - seg_t)
+
+            # Start-end error
+            diff_pred = abs(float(np_preds[end_idx] - np_preds[start_idx]))
+            diff_gt = abs(float(np_targets[end_idx] - np_targets[start_idx]))
+            start_end_errors.append(diff_gt - diff_pred)
+
+        if traj_errors:
+            all_errs = np.concatenate(traj_errors)
+            error_dict[f"{event_type}_mae"] = float(np.mean(np.abs(all_errs)))
+            error_dict[f"{event_type}_mse"] = float(np.mean(np.square(all_errs)))
+        else:
+            error_dict[f"{event_type}_mae"] = float('nan')
+            error_dict[f"{event_type}_mse"] = float('nan')
+
+        if start_end_errors:
+            error_dict[f"{event_type}_start_end_error"] = float(np.mean(np.square(start_end_errors)))
+        else:
+            error_dict[f"{event_type}_start_end_error"] = float('nan')
+
+    # Day boundary errors
+    user_file = os.path.join(data_dir, f"{user_id}_processed.xlsx")
+    day_boundaries = [0]
+    if os.path.exists(user_file):
+        df = pd.read_excel(user_file)
+        current_length = 0
+        for i, date_str in enumerate(dates):
+            df_row = df[df['date'] == date_str]
+            if df_row.empty:
+                continue
+            charge_series = safe_parse(df_row.iloc[0].get('charge.timeseries', '[]'))
+            current_length += len(charge_series)
+            if i < len(dates) - 1:
+                day_boundaries.append(current_length)
+
+    start_errors = []
+    end_errors = []
+    for day_idx in range(len(dates)):
+        if day_idx < len(day_boundaries):
+            day_start = day_boundaries[day_idx]
+        else:
+            break
+        if day_idx < len(day_boundaries) - 1:
+            day_end = day_boundaries[day_idx + 1] - 1
+        else:
+            day_end = min_len - 1
+
+        if day_end >= min_len or day_start >= min_len:
+            continue
+
+        if day_idx > 0:
+            start_errors.append(float(np_preds[day_start] - np_targets[day_start]))
+        end_errors.append(float(np_preds[day_end] - np_targets[day_end]))
+
+    error_dict['day_start_mae'] = float(np.mean(np.abs(start_errors))) if start_errors else float('nan')
+    error_dict['day_start_mse'] = float(np.mean(np.square(start_errors))) if start_errors else float('nan')
+    error_dict['day_end_mae'] = float(np.mean(np.abs(end_errors))) if end_errors else float('nan')
+    error_dict['day_end_mse'] = float(np.mean(np.square(end_errors))) if end_errors else float('nan')
+
+    # Overall trajectory error
+    overall_errors = np_preds[:min_len] - np_targets[:min_len]
+    error_dict['overall_traj_mae'] = float(np.mean(np.abs(overall_errors)))
+    error_dict['overall_traj_mse'] = float(np.mean(np.square(overall_errors)))
+
+    return error_dict
+
+
+def less_than_5_biocharge_patch(charge_pct):
+    """Cap biocharge to [5, 100] range."""
+    return max(5.0, min(100.0, charge_pct))
+
+
+# ---------------------------------------------------------------------------
 # BiochargePredictor
 # ---------------------------------------------------------------------------
 
 class BiochargePredictor:
-    """Loads a trained MLP_delta model and runs inference."""
+    """Loads a trained model and runs inference."""
 
     def __init__(
         self,
@@ -289,22 +484,32 @@ class BiochargePredictor:
         self.model.eval()
         self.model.to(self.device)
 
-        self.custom_scaling = True
+        # Determine scaling from normalization type
+        normalization_type = self.config.get("normalization_type", "znorm")
+        self.custom_scaling = (normalization_type == "max")
 
     def _load_config(self, checkpoint_dir: str) -> dict:
         config_path = os.path.join(checkpoint_dir, "model_config.json")
         with open(config_path) as f:
             return json.load(f)
 
-    def _load_from_checkpoint(self, checkpoint_dir: str) -> MLP_delta:
+    def _load_from_checkpoint(self, checkpoint_dir: str):
         config = self.config
-        model = MLP_delta(
-            input_dim=config["input_dim"],
-            hidden=config.get("hidden_dim", config.get("hidden", 128)),
-            layers=config.get("num_layers", config.get("layers", 3)),
-            dropout=config.get("dropout", 0.1),
-            norm=config.get("norm_type", config.get("norm", "layer")),
-        )
+        model_type = config.get("model_type", "mlp")
+
+        if model_type == "gated_dual_head":
+            model = GatedDualHeadMLP(
+                input_dim=config["input_dim"],
+            )
+            logger.info("Created GatedDualHeadMLP: input_dim=%d", config["input_dim"])
+        else:
+            model = MLP_delta(
+                input_dim=config["input_dim"],
+                hidden=config.get("hidden_dim", config.get("hidden", 128)),
+                layers=config.get("num_layers", config.get("layers", 3)),
+                dropout=config.get("dropout", 0.1),
+                norm=config.get("norm_type", config.get("norm", "layer")),
+            )
 
         ckpt_files = sorted(Path(checkpoint_dir).glob("best_model_*.pt"))
         if not ckpt_files:
@@ -312,19 +517,13 @@ class BiochargePredictor:
 
         latest_ckpt = ckpt_files[-1]
         model.load_state_dict(torch.load(latest_ckpt, map_location=self.device, weights_only=True))
+        logger.info("Loaded weights from: %s", latest_ckpt)
         return model
 
     # --- Simple prediction (existing) ---
 
     def predict(self, features: np.ndarray) -> np.ndarray:
-        """Run inference on a batch of feature vectors.
-
-        Args:
-            features: numpy array of shape (batch_size, input_dim)
-
-        Returns:
-            numpy array of shape (batch_size,) with delta charge predictions
-        """
+        """Run inference on a batch of feature vectors."""
         with torch.no_grad():
             x = torch.tensor(features, dtype=torch.float32).to(self.device)
             yhat = self.model(x)
@@ -336,7 +535,7 @@ class BiochargePredictor:
             features = features.reshape(1, -1)
         return float(self.predict(features)[0])
 
-    # --- Autoregressive inference (ported from run_inference.py) ---
+    # --- Autoregressive inference ---
 
     def run_autoregressive(self, dataset: TorchBiochargeDataset) -> dict:
         """Run autoregressive inference over a TorchBiochargeDataset.
@@ -379,26 +578,23 @@ class BiochargePredictor:
                 x[..., -1] = current_pred_charge
 
                 x_in = x.unsqueeze(0).float().to(self.device)
-                y_in = y.unsqueeze(0).float().to(self.device)
 
                 model_output = self.model(x_in)
                 if isinstance(model_output, tuple):
                     yhat, _ = model_output
                 else:
                     yhat = model_output
-                
-                if not self.custom_scaling:
+
+                if self.custom_scaling:
+                    delta_pred = (1.1 * (yhat.cpu().item() + 1) / 2 - 0.4) / 100
+                    delta_target = (1.1 * (y.cpu().item() + 1) / 2 - 0.4) / 100
+                else:
                     if torch.isnan(yhat).any() or torch.isinf(yhat).any():
                         logger.warning("Model produced NaN/Inf at step %d, using 0", i)
                         delta_pred = 0.0
                     else:
                         delta_pred = yhat.cpu().item() * 0.01
-
-                    delta_target = y_in.cpu().item() * 0.01
-                else:
-                    delta_pred = (1.1 * (yhat.cpu().item() + 1) / 2 - 0.4) / 100
-                    delta_target = (1.1 * (y.cpu().item() + 1) / 2 - 0.4) / 100
-
+                    delta_target = y.cpu().item() * 0.01
 
                 mask = sample.get("mask", torch.tensor([1.0]))
                 if mask.item() < 0.5:
@@ -407,7 +603,11 @@ class BiochargePredictor:
                 current_pred_charge += delta_pred
                 current_target_charge += delta_target
 
-                preds.append(current_pred_charge.item() * 100)
+                # Apply biocharge capping
+                pred_pct = less_than_5_biocharge_patch(current_pred_charge.item() * 100)
+                current_pred_charge = torch.tensor(pred_pct / 100.0)
+
+                preds.append(pred_pct)
                 targets.append(current_target_charge.item() * 100)
 
         for uid in meta_dict:
@@ -438,11 +638,12 @@ class BiochargePredictor:
         """Run the full autoregressive pipeline for a user and date(s).
 
         Handles .pt resolution, temp-index creation, dataset building,
-        and autoregressive prediction — matching run_inference.py behaviour.
+        autoregressive prediction, and region-based error computation.
 
         Returns:
             dict with keys: user_id, dates, num_samples, preds, targets,
-                            mae, mse, rmse, pred_range, target_range, meta
+                            mae, mse, rmse, pred_range, target_range, meta,
+                            region_errors
         """
         if not self.checkpoint_dir:
             raise ValueError(
@@ -485,6 +686,14 @@ class BiochargePredictor:
             # Step 5: autoregressive inference
             results = self.run_autoregressive(dataset)
 
+            # Step 6: region-based errors
+            region_errors = calculate_region_errors(
+                preds=results["preds"],
+                targets=results["targets"],
+                meta_dict=results["meta"],
+                data_dir=data_dir,
+            )
+
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -503,6 +712,7 @@ class BiochargePredictor:
             "pred_range": [float(min(preds)), float(max(preds))],
             "target_range": [float(min(targets)), float(max(targets))],
             "meta": results["meta"],
+            "region_errors": region_errors,
         }
 
     # --- Plot generation ---
