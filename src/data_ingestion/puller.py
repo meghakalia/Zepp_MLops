@@ -77,7 +77,7 @@ def pull_user_data(
         logger.warning("No data returned for user %s", userid)
         return None
 
-    process_fetched_data(userid, fetched, score_path, sleep_path)
+    process_fetched_data(userid, fetched, score_path, sleep_path, processing_mode = mode)
     logger.info("Data processing complete for user %s", userid)
     return fetched
 

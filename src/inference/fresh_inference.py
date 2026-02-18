@@ -100,9 +100,21 @@ def run_fresh_inference(
                         mae, mse, rmse, pred_range, target_range,
                         processed_excel_path, region_errors, plot_path (if plot=True)
     """
-    from src.data_ingestion.puller import pull_user_data
-    from src.inference.charge_analytics import compute_biocharge_ground_truth
-    from src.inference.predictor import BiochargePredictor
+    # from src.data_ingestion.puller import pull_user_data
+    # from src.inference.charge_analytics import compute_biocharge_ground_truth
+    # from src.inference.predictor import BiochargePredictor
+
+    # Try absolute imports first, fallback to relative for debugging
+    try:
+        from src.data_ingestion.puller import pull_user_data
+        from src.inference.charge_analytics import compute_biocharge_ground_truth
+        from src.inference.predictor import BiochargePredictor
+        from src.inference.plotting import generate_trajectory_plot
+    except ModuleNotFoundError:
+        from data_ingestion.puller import pull_user_data
+        from inference.charge_analytics import compute_biocharge_ground_truth
+        from inference.predictor import BiochargePredictor
+        from inference.plotting import generate_trajectory_plot
 
     user_id = str(user_id)
     temp_dir = tempfile.mkdtemp(prefix="biocharge_fresh_")
@@ -190,6 +202,7 @@ def run_fresh_inference(
         dates = _generate_date_list(from_date, to_date)
         print(f"Running autoregressive inference for {len(dates)} dates...")
 
+        # predictor = BiochargePredictor(checkpoint_dir=model_dir)
         predictor = BiochargePredictor(checkpoint_dir=model_dir)
         results = predictor.run_inference_for_user(
             user_id=user_id,
@@ -206,7 +219,8 @@ def run_fresh_inference(
             print(f"STAGE 4: Plot")
             print(f"{'='*60}")
             try:
-                from src.inference.plotting import generate_trajectory_plot
+                # from src.inference.plotting import generate_trajectory_plot
+                from inference.plotting import generate_trajectory_plot
                 date_str = f"{from_date}_to_{to_date}"
                 plot_path = os.path.join(output_dir, f"fresh_inference_{user_id}_{date_str}.png")
                 os.makedirs(output_dir, exist_ok=True)
@@ -273,7 +287,7 @@ def main():
         help="Path to z-score JSON file"
     )
     parser.add_argument(
-        "--pull_mode", default="ONLINE", choices=["ONLINE", "OFFLINE"],
+        "--pull_mode", default="OFFLINE", choices=["ONLINE", "OFFLINE"],
         help="Data pull mode: ONLINE (API) or OFFLINE (local files)"
     )
     parser.add_argument(
@@ -284,7 +298,7 @@ def main():
         "--skip_ground_truth", action="store_true",
         help="Skip ground truth computation (assume {user_id}_processed.xlsx exists)"
     )
-    parser.add_argument("--plot", action="store_true", help="Generate prediction plot")
+    parser.add_argument("--plot", action="store_false", help="Generate prediction plot")
     parser.add_argument("--output_dir", default="outputs", help="Plot output directory")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 

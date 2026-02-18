@@ -269,11 +269,18 @@ def get_hrv_factor_for_day(daily_data: pd.DataFrame,
         index=pd.to_datetime(hrv_part["date"])
     ).sort_index()
 
+    # Check for empty or all-NaT index
+    if hrv_series.empty or hrv_series.index.isna().all():
+        return np.nan
+
+    min_idx = hrv_series.index.min()
+    max_idx = hrv_series.index.max()
+    if pd.isna(min_idx) or pd.isna(max_idx):
+        return np.nan
+
     # 按自然日补齐到“今天”为止，缺失为NaN
     hrv_series = hrv_series.reindex(
-        pd.date_range(hrv_series.index.min(),
-                      hrv_series.index.max(),   # 这里就是当前这一天
-                      freq="D")
+        pd.date_range(min_idx, max_idx, freq="D")
     )
 
     factors = hrv_factor_series(hrv_series, decay_missing=decay_missing)
