@@ -219,8 +219,6 @@ def run_fresh_inference(
             print(f"STAGE 4: Plot")
             print(f"{'='*60}")
             try:
-                # from src.inference.plotting import generate_trajectory_plot
-                from inference.plotting import generate_trajectory_plot
                 date_str = f"{from_date}_to_{to_date}"
                 plot_path = os.path.join(output_dir, f"fresh_inference_{user_id}_{date_str}.png")
                 os.makedirs(output_dir, exist_ok=True)
