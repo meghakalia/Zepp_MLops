@@ -68,6 +68,11 @@ _metrics = {
     "per_user": {},
     # mean across users in last batch run
     "aggregate": {},
+    # Last pull metadata
+    "last_pull_user_ids": [],
+    "last_pull_from_date": "",
+    "last_pull_to_date": "",
+    "last_pull_timestamp": 0.0,
 }
 # Default paths (overridable via env vars or request body)
 DEFAULT_DATA_DIR = os.environ.get(
@@ -203,7 +208,7 @@ class FreshInferenceResponse(BaseModel):
 
 
 class BatchFreshInferenceRequest(BaseModel):
-    user_ids: list[str]           # 1–3 user IDs
+    user_ids: list[str]           # 1–5 user IDs
     from_date: str
     to_date: str
     model_dir: Optional[str] = None
@@ -407,6 +412,15 @@ async def fresh_inference(request: FreshInferenceRequest, fastapi_request: Reque
             _metrics["last_day_start_mae"] = region_errors.get("day_start_mae", float("nan"))
             _metrics["last_day_end_mae"] = region_errors.get("day_end_mae", float("nan"))
 
+        # Track last pull metadata and per-user stats (single user)
+        user_metrics = _collect_user_metrics(results)
+        _metrics["per_user"] = {request.user_id: user_metrics}
+        _metrics["aggregate"] = user_metrics
+        _metrics["last_pull_user_ids"] = [request.user_id]
+        _metrics["last_pull_from_date"] = request.from_date
+        _metrics["last_pull_to_date"] = request.to_date
+        _metrics["last_pull_timestamp"] = time.time()
+
         return FreshInferenceResponse(**{
             k: results[k]
             for k in FreshInferenceResponse.model_fields
@@ -485,6 +499,15 @@ async def fresh_inference_plot(request: FreshInferenceRequest, fastapi_request: 
             _metrics["last_day_start_mae"] = region_errors.get("day_start_mae", float("nan"))
             _metrics["last_day_end_mae"] = region_errors.get("day_end_mae", float("nan"))
 
+        # Track last pull metadata and per-user stats (single user)
+        user_metrics = _collect_user_metrics(results)
+        _metrics["per_user"] = {request.user_id: user_metrics}
+        _metrics["aggregate"] = user_metrics
+        _metrics["last_pull_user_ids"] = [request.user_id]
+        _metrics["last_pull_from_date"] = request.from_date
+        _metrics["last_pull_to_date"] = request.to_date
+        _metrics["last_pull_timestamp"] = time.time()
+
         return Response(content=png_bytes, media_type="image/png")
     except HTTPException:
         raise
@@ -526,7 +549,7 @@ def _compute_aggregate(per_user: dict) -> dict:
 @app.post("/batch-fresh-inference", response_model=BatchFreshInferenceResponse)
 async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_request: Request):
     """
-    Run fresh inference for multiple users (up to 3) sequentially.
+    Run fresh inference for multiple users (up to 5) sequentially.
     Aggregates region-based errors as mean across all users.
     When per_user_metrics=True, per-user breakdown is emitted to Prometheus.
     """
@@ -536,7 +559,7 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
     if predictor is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    user_ids = request.user_ids[:3]  # cap at 3
+    user_ids = request.user_ids[:5]  # cap at 5
     per_user_results = []
     per_user_data = {}
     failed = 0
@@ -573,6 +596,12 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
 
     aggregate = _compute_aggregate(per_user_data)
     _metrics["aggregate"] = aggregate
+
+    # Record last pull metadata
+    _metrics["last_pull_user_ids"] = list(user_ids)
+    _metrics["last_pull_from_date"] = request.from_date
+    _metrics["last_pull_to_date"] = request.to_date
+    _metrics["last_pull_timestamp"] = time.time()
 
     if request.per_user_metrics:
         _metrics["per_user"] = per_user_data
@@ -803,6 +832,34 @@ async def metrics(request: Request):
             u_rmse = udata.get("rmse", float("nan"))
             if not math.isnan(u_rmse):
                 lines.append(f'biocharge_user_inference_rmse{{user_id="{uid}"}} {u_rmse:.6f}')
+        lines.append("")
+
+    # ---- Last pull metadata ----
+    last_pull_user_ids = _metrics.get("last_pull_user_ids", [])
+    last_pull_from = _metrics.get("last_pull_from_date", "")
+    last_pull_to = _metrics.get("last_pull_to_date", "")
+    last_pull_ts = _metrics.get("last_pull_timestamp", 0.0)
+
+    if last_pull_user_ids:
+        user_ids_str = ",".join(str(u) for u in last_pull_user_ids)
+        lines.extend([
+            "# HELP biocharge_last_pull_info Metadata labels for the most recent data pull",
+            "# TYPE biocharge_last_pull_info gauge",
+            f'biocharge_last_pull_info{{user_ids="{user_ids_str}",from_date="{last_pull_from}",to_date="{last_pull_to}"}} 1',
+            "",
+            "# HELP biocharge_last_pull_timestamp Unix timestamp of the most recent data pull",
+            "# TYPE biocharge_last_pull_timestamp gauge",
+            f"biocharge_last_pull_timestamp {last_pull_ts:.3f}",
+            "",
+            "# HELP biocharge_last_pull_user_count Number of users in the most recent data pull",
+            "# TYPE biocharge_last_pull_user_count gauge",
+            f"biocharge_last_pull_user_count {len(last_pull_user_ids)}",
+            "",
+            "# HELP biocharge_last_pull_user Whether a user was included in the last pull",
+            "# TYPE biocharge_last_pull_user gauge",
+        ])
+        for uid in last_pull_user_ids:
+            lines.append(f'biocharge_last_pull_user{{user_id="{uid}"}} 1')
         lines.append("")
 
     return Response(content="\n".join(lines), media_type="text/plain")
