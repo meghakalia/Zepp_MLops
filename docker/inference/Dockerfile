@@ -2,6 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Install build tools needed for tdigest (Cython extension)
+RUN apt-get update -qq && apt-get install -y -qq gcc && rm -rf /var/lib/apt/lists/*
+
 # Install only inference dependencies (CPU-only torch, no GPU)
 
 RUN pip install --no-cache-dir \
@@ -16,7 +19,10 @@ RUN pip install --no-cache-dir \
     pandas \
     openpyxl \
     matplotlib \
-    tqdm
+    tqdm \
+    statsmodels \
+    tdigest \
+    xlsxwriter
 
 # Copy only what inference needs (standalone)
 COPY src/__init__.py src/__init__.py

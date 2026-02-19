@@ -410,6 +410,7 @@ async def fresh_inference(request: FreshInferenceRequest, fastapi_request: Reque
         return FreshInferenceResponse(**{
             k: results[k]
             for k in FreshInferenceResponse.model_fields
+            if k in results
         })
     except HTTPException:
         raise
