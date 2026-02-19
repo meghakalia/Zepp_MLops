@@ -10,7 +10,8 @@
       "Bash(curl:*)",
       "Bash(docker exec:*)",
       "Bash(docker cp:*)",
-      "Bash(docker restart:*)"
+      "Bash(docker restart:*)",
+      "Bash(python3:*)"
     ]
   }
 }

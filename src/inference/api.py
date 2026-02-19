@@ -187,6 +187,7 @@ class FreshInferenceRequest(BaseModel):
     skip_pull: bool = False
     skip_ground_truth: bool = False
     plot: bool = False
+    save_plots_mlflow: bool = False  # log trajectory plot to MLflow as artifact
 
 
 class FreshInferenceResponse(BaseModel):
@@ -208,7 +209,7 @@ class FreshInferenceResponse(BaseModel):
 
 
 class BatchFreshInferenceRequest(BaseModel):
-    user_ids: list[str]           # 1–5 user IDs
+    user_ids: list[str]           # any number of user IDs
     from_date: str
     to_date: str
     model_dir: Optional[str] = None
@@ -218,6 +219,7 @@ class BatchFreshInferenceRequest(BaseModel):
     skip_pull: bool = False
     skip_ground_truth: bool = False
     per_user_metrics: bool = True  # store per-user breakdown in Prometheus
+    save_plots_mlflow: bool = False  # log per-user trajectory plots to MLflow as artifacts
 
 
 class BatchFreshInferenceResponse(BaseModel):
@@ -421,6 +423,31 @@ async def fresh_inference(request: FreshInferenceRequest, fastapi_request: Reque
         _metrics["last_pull_to_date"] = request.to_date
         _metrics["last_pull_timestamp"] = time.time()
 
+        if request.save_plots_mlflow:
+            from src.inference.plotting import generate_trajectory_plot
+            from src.inference.fresh_inference import _generate_date_list
+            dates_list = _generate_date_list(request.from_date, request.to_date)
+            data_dir_for_plot = os.path.dirname(results.get("processed_excel_path", "")) or DEFAULT_FRESH_DATA_DIR
+            try:
+                png_bytes = generate_trajectory_plot(
+                    preds=results["preds"],
+                    targets=results["targets"],
+                    user_id=request.user_id,
+                    dates=dates_list,
+                    data_dir=data_dir_for_plot,
+                    error_dict=results.get("region_errors", {}),
+                )
+                _log_plots_to_mlflow(
+                    run_name=f"fresh_inference_{request.user_id}_{request.from_date}_{request.to_date}",
+                    from_date=request.from_date,
+                    to_date=request.to_date,
+                    per_user_plots={request.user_id: png_bytes},
+                    aggregate=user_metrics,
+                    per_user_data={request.user_id: user_metrics},
+                )
+            except Exception as plot_err:
+                logger.warning("MLflow plot logging failed for user %s: %s", request.user_id, plot_err)
+
         return FreshInferenceResponse(**{
             k: results[k]
             for k in FreshInferenceResponse.model_fields
@@ -546,12 +573,73 @@ def _compute_aggregate(per_user: dict) -> dict:
     return agg
 
 
+def _log_plots_to_mlflow(
+    run_name: str,
+    from_date: str,
+    to_date: str,
+    per_user_plots: dict,
+    aggregate: dict,
+    per_user_data: dict,
+) -> None:
+    """Log per-user trajectory plots and metrics to an MLflow run.
+
+    Args:
+        run_name: Display name for the MLflow run.
+        from_date: Inference start date (YYYY-MM-DD).
+        to_date: Inference end date (YYYY-MM-DD).
+        per_user_plots: Mapping of user_id -> PNG bytes.
+        aggregate: Aggregate metrics dict (mean across users).
+        per_user_data: Per-user metrics dicts from _collect_user_metrics.
+    """
+    import math
+    import tempfile
+
+    try:
+        import mlflow
+    except ImportError:
+        logger.warning("mlflow not installed; skipping MLflow plot logging")
+        return
+
+    mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
+    mlflow.set_tracking_uri(mlflow_uri)
+    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME", "biocharge-inference")
+    mlflow.set_experiment(experiment_name)
+
+    try:
+        with mlflow.start_run(run_name=run_name):
+            mlflow.log_param("from_date", from_date)
+            mlflow.log_param("to_date", to_date)
+            mlflow.log_param("num_users", len(per_user_plots))
+
+            # Aggregate metrics
+            for k, v in aggregate.items():
+                if isinstance(v, float) and not math.isnan(v):
+                    mlflow.log_metric(f"aggregate_{k}", v)
+
+            # Per-user metrics (prefixed with user id)
+            for uid, udata in per_user_data.items():
+                for k, v in udata.items():
+                    if isinstance(v, float) and not math.isnan(v):
+                        mlflow.log_metric(f"user_{uid}_{k}", v)
+
+            # Plot artifacts
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for uid, png_bytes in per_user_plots.items():
+                    plot_path = os.path.join(tmpdir, f"user_{uid}_trajectory.png")
+                    with open(plot_path, "wb") as f:
+                        f.write(png_bytes)
+                    mlflow.log_artifact(plot_path, artifact_path="plots")
+    except Exception as e:
+        logger.error("MLflow logging failed: %s", e)
+
+
 @app.post("/batch-fresh-inference", response_model=BatchFreshInferenceResponse)
 async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_request: Request):
     """
-    Run fresh inference for multiple users (up to 5) sequentially.
+    Run fresh inference for any number of users sequentially.
     Aggregates region-based errors as mean across all users.
     When per_user_metrics=True, per-user breakdown is emitted to Prometheus.
+    When save_plots_mlflow=True, trajectory plots are logged as MLflow artifacts.
     """
     from src.inference.fresh_inference import run_fresh_inference
 
@@ -559,9 +647,10 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
     if predictor is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    user_ids = request.user_ids[:5]  # cap at 5
+    user_ids = request.user_ids
     per_user_results = []
     per_user_data = {}
+    per_user_plots: dict = {}
     failed = 0
 
     for uid in user_ids:
@@ -589,6 +678,24 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
             })
             per_user_data[uid] = _collect_user_metrics(result)
             _metrics["fresh_inference_total"] += 1
+
+            if request.save_plots_mlflow:
+                from src.inference.plotting import generate_trajectory_plot
+                from src.inference.fresh_inference import _generate_date_list
+                dates_list = _generate_date_list(request.from_date, request.to_date)
+                data_dir_for_plot = os.path.dirname(result.get("processed_excel_path", "")) or request.data_dir or DEFAULT_FRESH_DATA_DIR
+                try:
+                    png_bytes = generate_trajectory_plot(
+                        preds=result["preds"],
+                        targets=result["targets"],
+                        user_id=uid,
+                        dates=dates_list,
+                        data_dir=data_dir_for_plot,
+                        error_dict=result.get("region_errors", {}),
+                    )
+                    per_user_plots[uid] = png_bytes
+                except Exception as plot_err:
+                    logger.warning("Plot generation failed for user %s: %s", uid, plot_err)
         except Exception as e:
             logger.error("Batch inference failed for user %s: %s", uid, e)
             _metrics["fresh_inference_errors"] += 1
@@ -620,6 +727,16 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
         _metrics["last_day_start_mae"] = aggregate.get("day_start_mae", float("nan"))
         _metrics["last_day_end_mae"] = aggregate.get("day_end_mae", float("nan"))
         _metrics["last_overall_traj_mae"] = aggregate.get("overall_traj_mae", float("nan"))
+
+    if request.save_plots_mlflow and per_user_plots:
+        _log_plots_to_mlflow(
+            run_name=f"batch_inference_{request.from_date}_{request.to_date}",
+            from_date=request.from_date,
+            to_date=request.to_date,
+            per_user_plots=per_user_plots,
+            aggregate=aggregate,
+            per_user_data=per_user_data,
+        )
 
     return BatchFreshInferenceResponse(
         user_ids=user_ids,
