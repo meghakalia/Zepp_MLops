@@ -2657,6 +2657,8 @@ class TorchBiochargeDataset(Dataset):
 
         self.normalization_type = cfg.normalization_type
 
+        self.separate_recovery_rate = cfg.separate_recovery_rate
+
         self.generate_trajectory = getattr(cfg, 'generate_trajectory', False)
 
     def get_indices(self):
@@ -4760,29 +4762,31 @@ class TorchBiochargeDataset(Dataset):
             # if idx > 1500:
             #     mask = 0.0
 
-            # Delta scaling depends on normalization type
-            if self.normalization_type == "max":
-                # Normalize delta to [-1, 1] range using min=-0.4, max=0.7
-                y = 2 * ((torch.tensor([charge_delta * 100], dtype=torch.float32) - (-0.4)) / (0.7 - (-0.4))) - 1
-                y_add_1_t = 2 * ((torch.tensor([y_add_1 * 100], dtype=torch.float32) - (-0.4)) / (0.7 - (-0.4))) - 1
-            else:
-                y = torch.tensor([charge_delta * 100], dtype=torch.float32)
-                y_add_1_t = torch.tensor([y_add_1 * 100], dtype=torch.float32)
+
+
+            # # normalize between -1 to 1. range is -0.4 to 0.7, normlaizing only delta
+            y = 2 * ((torch.tensor([charge_delta*100], dtype=torch.float32) - (-0.4)) / (0.7 - (-0.4))) - 1
+            # y       = (torch.tensor([charge_delta * 100], dtype=torch.float32) - (-0.4) / (0.7 - (-0.4)))*2 - 1
+            y_add_1 = 2 * ((torch.tensor([y_add_1*100], dtype=torch.float32) - (-0.4)) / (0.7 - (-0.4))) - 1
+
+            # y = torch.tensor([charge_delta*100], dtype=torch.float32)
+            # # y       = (torch.tensor([charge_delta * 100], dtype=torch.float32) - (-0.4) / (0.7 - (-0.4)))*2 - 1
+            # y_add_1 = 2 * ((torch.tensor([y_add_1*100], dtype=torch.float32) - (-0.4)) / (0.7 - (-0.4))) - 1
 
             return {
                 "x": torch.from_numpy(x).float(),
-                "y": y,  # DELTA scaled
+                "y": y,  # DELTA scaled and normalized
                 "mask": torch.tensor([mask], dtype=torch.float32),
                 'meta': {'user_id': user_id, 'date': date_str, 'idx': idx},
-                'charge_recon': charge_recon,
+                'charge_recon': charge_recon, 
                 "x_add_1": torch.from_numpy(x_add_1).float(),
-                "y_add_1": y_add_1_t
+                "y_add_1": y_add_1
             }
 
         except Exception as e:
             print(f"Error in TorchBiochargeDataset[{i}]: {e}")
-            # Return default values
-            default_dim = len(self.cfg.static_cols) + len(self.cfg.sleep_cols) + len(self.cfg.ts_cols)
+            # Return default values - use get_feature_count() to match model input dimension
+            default_dim = self.get_feature_count()
             x = np.zeros(default_dim, dtype=np.float32)
             x_add_1 = np.full(self.get_feature_count(), -6.0, dtype=np.float32)
             return {
@@ -4790,7 +4794,7 @@ class TorchBiochargeDataset(Dataset):
                 "y": torch.tensor([0.0], dtype=torch.float32),
                 "mask": torch.tensor([0.0], dtype=torch.float32),
                 "x_add_1": torch.from_numpy(x_add_1).float(),
-                "y_add_1": torch.tensor([-6.0 * 100], dtype=torch.float32)
+                "y_add_1": torch.tensor([-6.0*100], dtype=torch.float32)
             }
 
     def get_feature_list(self) -> List:
@@ -4857,6 +4861,7 @@ class TorchBiochargeDataset(Dataset):
 
         return feature_names
 
+
     def _extract_and_normalize_torch(self, data, date_idx, idx, user_id, date_str):
         """
         Extract raw values from torch tensor and apply BiochargeDataset-style normalization.
@@ -4872,34 +4877,46 @@ class TorchBiochargeDataset(Dataset):
         yesterday_matches = (data["dates"] == yesterday_query).nonzero(as_tuple=True)[0]
         yesterday_date_idx = yesterday_matches[0].item() if len(yesterday_matches) > 0 else None
 
-        # simulate real-world HR availability
-        # hr_available = (np.random.rand() < 0.25)
+        # --- Cache sleep and nap start indices per user/date ---
+        if not hasattr(self, 'sleep_start_cache_torch'):
+            self.sleep_start_cache_torch = {}
+        if not hasattr(self, 'nap_start_cache_torch'):
+            self.nap_start_cache_torch = {}
 
-        # Find sleep start index from sleep_markers
-        idx_sleep_start = 0
-        if "timeseries.sleep_markers" in column_to_idx:
-            sleep_markers_idx = column_to_idx["timeseries.sleep_markers"]
-            sleep_markers = features_data[sleep_markers_idx][date_idx]
-            if isinstance(sleep_markers, (list, tuple)):
-                for i, val in enumerate(sleep_markers):
-                    if val == 1:
-                        idx_sleep_start = i
-                        break
+        if user_id not in self.sleep_start_cache_torch:
+            self.sleep_start_cache_torch[user_id] = {}
+        if user_id not in self.nap_start_cache_torch:
+            self.nap_start_cache_torch[user_id] = {}
 
-        # Find nap start index from nap_state
-        idx_nap_start = 0
-        if "timeseries.nap_state" in column_to_idx:
-            nap_state_idx = column_to_idx["timeseries.nap_state"]
-            nap_state_data = features_data[nap_state_idx][date_idx]
-            if isinstance(nap_state_data, (list, tuple)):
-                for i, val in enumerate(nap_state_data):
-                    if val == 1:
-                        idx_nap_start = i
-                        break
+        # Sleep start index
+        if date_str in self.sleep_start_cache_torch[user_id]:
+            idx_sleep_start = self.sleep_start_cache_torch[user_id][date_str]
+        else:
+            idx_sleep_start = 0
+            if "timeseries.sleep_markers" in column_to_idx:
+                sleep_markers_idx = column_to_idx["timeseries.sleep_markers"]
+                sleep_markers = features_data[sleep_markers_idx][date_idx]
+                if isinstance(sleep_markers, (list, tuple)):
+                    for i, val in enumerate(sleep_markers):
+                        if val == 1:
+                            idx_sleep_start = i
+                            break
+            self.sleep_start_cache_torch[user_id][date_str] = idx_sleep_start
 
-        # Initialize sleep/nap state tracking for positional encoding
-        current_sleep_state = 0
-        current_nap_state = 0
+        # Nap start index
+        if date_str in self.nap_start_cache_torch[user_id]:
+            idx_nap_start = self.nap_start_cache_torch[user_id][date_str]
+        else:
+            idx_nap_start = 0
+            if "timeseries.nap_state" in column_to_idx:
+                nap_state_idx = column_to_idx["timeseries.nap_state"]
+                nap_state = features_data[nap_state_idx][date_idx]
+                if isinstance(nap_state, (list, tuple)):
+                    for i, val in enumerate(nap_state):
+                        if val == 1:
+                            idx_nap_start = i
+                            break
+            self.nap_start_cache_torch[user_id][date_str] = idx_nap_start
 
         # Calculate BMI if height and weight are both present (matching BiochargeDataset)
         bmi_value = None
@@ -4934,16 +4951,58 @@ class TorchBiochargeDataset(Dataset):
                     feats.append(float(bmi_value))
                 # Skip height entirely
                 continue
+            
+            # # Apply same normalization as BiochargeDataset
+            # if 'age' in col.lower():
+            #     val = float(col_data) / 80.0
+            # elif 'gender' in col:
+            #     val = float(col_data)
+            # elif col in ["sleep_duration", "wakefulness_after_sleep_onset_duration"]:
+            #     val = float(col_data) / 660.0
+            # elif col in ["rem_sleep_ratio", "deep_sleep_ratio", "light_sleep_ratio"]:
+            #     val = float(col_data)  # Already in 0-1 range
+            # elif col in ["z_rhr_7", "z_hrv_7"]:
+            #     val = float(col_data)  # Already z-scored
+            # else:
+            #     val = float(col_data) / 100.0
 
             # Apply same normalization as BiochargeDataset
             if 'age' in col.lower():
                 val = float(col_data) / 80.0
             elif 'gender' in col:
                 val = float(col_data)
-            elif col in ["sleep_duration", "wakefulness_after_sleep_onset_duration"]:
-                val = float(col_data) / 660.0
-            elif col in ["rem_sleep_ratio", "deep_sleep_ratio", "light_sleep_ratio"]:
-                val = float(col_data)  # Already in 0-1 range
+            elif col in ["sleep.waso_score", "sleep.start_time_score", "sleep.duration_score", "sleep.deep_sleep_score"]:
+                
+                val = float(col_data) / 100
+                if col == "sleep.duration_score":
+                    self.sleep_duration_score = val
+                elif col == "sleep.start_time_score":
+                    self.sleep_start_time_score = val
+                elif col == "sleep.waso_score":
+                    self.waso_score = val
+
+            elif col in ['stress.fitness_fatigue_difference', 'hrv_factor', 'rhr_factor']: # this feature is very sparse # this should be the final version, New
+            # elif col in ['stress.fitness_fatigue_difference']: # this feature is very sparse
+                # use yesterday row if current idx is less than sleep start
+                if idx < idx_sleep_start and yesterday_date_idx is not None:
+                    col_data = features_data[col_idx][yesterday_date_idx]
+                else:
+                    col_data = features_data[col_idx][date_idx]
+                
+                
+                val = float(col_data) # already in range
+
+            # elif col in ["sleep.duration_score", "sleep.deep_sleep_score", "light_sleep_ratio"]:
+            #     val = float(col_data)  # Already in 0-1 range
+            elif col in ["rhrScore", "hrvScore"]:
+
+                # depending on sleep index # NEW
+                if idx < idx_sleep_start and yesterday_date_idx is not None:
+                    col_data = features_data[col_idx][yesterday_date_idx]
+                else:
+                    col_data = features_data[col_idx][date_idx]
+
+                val = float(col_data)/100
             elif col in ["z_rhr_7", "z_hrv_7"]:
                 val = float(col_data)  # Already z-scored
             else:
@@ -4966,10 +5025,24 @@ class TorchBiochargeDataset(Dataset):
             else:
                 raw_val = 0.0
 
+            # stress 
+            if 'timeseries.full_stress_list' in col.lower():
+                val = raw_val
+                feats.append(val if not np.isnan(val) and not np.isinf(val) else -6.0)
+                continue
+
+            # know the current sleep state
+            if "timeseries.sleep_markers" in col.lower():
+                self.sleep_state = raw_val # either 0 / 1
+
+            if "timeseries.nap_state" in col.lower():
+                self.nap_state = raw_val # either 0 / 1
+
             # Special handling for sleep_stage
             if 'sleep_stage' in col.lower():
                 val = raw_val / 3.0  # Normalize to 0-1
                 feats.append(val)
+
                 self.sleep_stage = raw_val  # store for recovery rate feature
                 continue
 
@@ -4979,130 +5052,82 @@ class TorchBiochargeDataset(Dataset):
             if 'hrr_raw' in col.lower():
                 col_string = 'timeseries.hrr_raw'
                 raw_val = raw_val / 100.0  # Normalize HRR raw
-
-                # Check if HR should be dropped entirely
-                if hasattr(self.cfg, 'drop_hr') and self.cfg.drop_hr:
-                    feats.append(-6.0)
-                    continue
-
-                if not self.generate_trajectory: # during training
-                    # Get exercise, sleep_markers, and nap_state at current idx
-                    exercise_val = 0
-                    sleep_markers_val = 0
-                    nap_state_val = 0
-
-                    if "timeseries.exercise" in column_to_idx:
-                        exercise_data = features_data[column_to_idx["timeseries.exercise"]][date_idx]
-                        if isinstance(exercise_data, (list, tuple)) and len(exercise_data) > idx:
-                            exercise_val = float(exercise_data[idx])
-
-                    if "timeseries.sleep_markers" in column_to_idx:
-                        sleep_markers_data = features_data[column_to_idx["timeseries.sleep_markers"]][date_idx]
-                        if isinstance(sleep_markers_data, (list, tuple)) and len(sleep_markers_data) > idx:
-                            sleep_markers_val = float(sleep_markers_data[idx])
-
-                    if "timeseries.nap_state" in column_to_idx:
-                        nap_state_data = features_data[column_to_idx["timeseries.nap_state"]][date_idx]
-                        if isinstance(nap_state_data, (list, tuple)) and len(nap_state_data) > idx:
-                            nap_state_val = float(nap_state_data[idx])
-
-                    # Apply conditional logic
-                    if exercise_val == 1:
-                        # Always use raw value when exercising
-                        final_hrr = raw_val
-                    elif sleep_markers_val == 1 or nap_state_val == 1:
-                        # Use value 1/5th of the time during sleep/nap, otherwise set to -6
-                        if np.random.random() < 0.25:
-                            final_hrr = raw_val
-                        else:
-                            final_hrr = -6.0
+                feats.append(raw_val)
+                continue
+            
+            if self.normalization_type == "max": 
+                if 'acc' in col.lower():
+                    if raw_val > 150:
+                        raw_val = -6.0  #missing
                     else:
-                        # When awake, use value 1/10th of the time, otherwise set to -6
-                        if np.random.random() < 0.2:
-                            final_hrr = raw_val
-                        else:
-                            final_hrr = -6.0
+                        raw_val = raw_val / 150  # Normalize ACC with population max 
 
-                    feats.append(final_hrr)
-                    continue
-                else:
-                    # during trajectory generation
-                    # get 'hr_available' column from torch data
-                    if "timeseries.hr_available" in column_to_idx:
-                        hr_available_idx = column_to_idx["timeseries.hr_available"]
-                        hr_available_data = features_data[hr_available_idx][date_idx]
 
-                        # Check per-minute availability if it's a list
-                        if isinstance(hr_available_data, (list, tuple)) and len(hr_available_data) > idx:
-                            hr_avail_at_idx = hr_available_data[idx]
-                        else:
-                            hr_avail_at_idx = hr_available_data  # single value for whole day
+                if 'timeseries.hr_filtered' in col.lower():
 
-                        if hr_avail_at_idx == 1:
-                            feats.append(raw_val)  # raw_val is already normalized
-                            continue
-                        else:
-                            feats.append(-6.0)
-                            continue
+                    if raw_val > 240:
+                        raw_val = -6.0  #missing
                     else:
-                        # Fallback: no hr_available column, use -6 (missing)
-                        feats.append(-6.0)
-                        continue
+                        raw_val = raw_val / 240  # Normalize HR filtered
 
-            if self.zdf and self.cfg.use_zscores and col_string in self.zdf.get('global', {}):
-                if self.z_data_norm == 'population':
-                    z_std = self.zdf['global'][col_string]['std']
-                    z_mean = self.zdf['global'][col_string]['mean']
-                else:
-                    user_id_str = str(user_id)
-                    if user_id_str in self.zdf and col_string in self.zdf[user_id_str]:
-                        z_std = self.zdf[user_id_str][col_string]['std']
-                        z_mean = self.zdf[user_id_str][col_string]['mean']
-                    elif col_string in self.zdf['global']:
+                val = raw_val
+                
+            else:
+
+                if self.zdf and self.cfg.use_zscores and col_string in self.zdf.get('global', {}):
+                    if self.z_data_norm == 'population':
                         z_std = self.zdf['global'][col_string]['std']
                         z_mean = self.zdf['global'][col_string]['mean']
                     else:
-                        feats.append(raw_val)
-                        continue
+                        user_id_str = str(user_id)
+                        if user_id_str in self.zdf and col_string in self.zdf[user_id_str]:
+                            z_std = self.zdf[user_id_str][col_string]['std']
+                            z_mean = self.zdf[user_id_str][col_string]['mean']
+                        elif col_string in self.zdf['global']:
+                            z_std = self.zdf['global'][col_string]['std']
+                            z_mean = self.zdf['global'][col_string]['mean']
+                        else:
+                            feats.append(raw_val)
+                            continue
 
-                val = (raw_val - z_mean) / z_std if z_std > 0 else 0.0
-            else:
-                val = raw_val
+                    val = (raw_val - z_mean) / z_std if z_std > 0 else 0.0
 
             feats.append(val if not np.isnan(val) and not np.isinf(val) else -6.0)
 
-            # Track sleep/nap state for positional encoding
-            if "timeseries.sleep_markers" in col.lower():
-                current_sleep_state = raw_val
-            if "timeseries.nap_state" in col.lower():
-                current_nap_state = raw_val
-
-        # Positional encoding (must come BEFORE past_charge, which is always last)
+        # positional encoding
         if self.cfg.use_positional_encoding:
             try:
                 if self.cfg.pos_encoding_type == "biocharge_circadian":
                     # total 4 more additional features, right before past charge
-                    circardian_feature = self.time_encoding_for_charge_torch(idx % 1440)  # 3 features
-                    time_state = self.time_in_state(idx, nap_state=current_nap_state, nap_start=idx_nap_start,
-                                                   sleep_state=current_sleep_state, sleep_start=idx_sleep_start,
-                                                   wake_up_time=0)  # 1 feature
+                    circardian_feature = self.time_encoding_for_charge_torch(idx % 1440) # 3
+                    time_state = self.time_in_state(idx, nap_state=self.nap_state, nap_start=idx_nap_start, sleep_state=self.sleep_state, sleep_start=idx_sleep_start, wake_up_time= 0) # 1
+
                     feats.extend(circardian_feature.tolist())
                     feats.append(time_state.item())  # time_state is scalar tensor, use .item()
             except Exception:
+                print(f"Error in positional encoding for user {user_id} on date {date_str}")
                 if self.cfg.pos_encoding_type == "biocharge_circadian":
                     feats.extend([0.0] * 4)  # biocharge_circadian always has 4 features
                 else:
                     feats.extend([0.0, 0.0])
-
+        
         if self.use_recovery_rate_feature:
             try:
                 if self.separate_recovery_rate:
-                    recovery_rate_list = self.get_stage_recovery_rate_two(sleep_stage=self.sleep_stage, sleep_state=current_sleep_state)
+                    recovery_rate_list = self.get_stage_recovery_rate_two(sleep_stage=self.sleep_stage, sleep_state=self.sleep_state)
                     for rr in recovery_rate_list:
                         feats.append(rr)
                 else:
-                    recovery_rate = self.get_stage_recovery_rate(sleep_stage=self.sleep_stage, sleep_state=current_sleep_state)
+                    recovery_rate = self.get_stage_recovery_rate(sleep_stage=self.sleep_stage, sleep_state=self.sleep_state)
                     feats.append(recovery_rate)
+            except Exception:
+                feats.append(-6.0)
+        
+        if self.weighted_sleep_score: 
+            # explicit sleep score feature
+            try:
+                weighted_sleep_score = (self.sleep_duration_score * 0.5) + (self.sleep_start_time_score * 0.25) + (self.waso_score * 0.25)
+                feats.append(weighted_sleep_score)
             except Exception:
                 feats.append(-6.0)
 

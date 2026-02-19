@@ -227,6 +227,10 @@ def create_inference_config(model_config_path, temp_pt_dir, temp_index_csv, zsco
     include_gradients = model_config.get("use_gradient_features") or dataset_config.get("include_gradients", False)
     use_recovery_rate_feature = model_config.get("use_recovery_rate_feature") or dataset_config.get("use_recovery_rate_feature", False)
     weighted_sleep_score = model_config.get("weighted_sleep_score") or dataset_config.get("weighted_sleep_score", False)
+    #-------------
+    #   Debug 
+    # ------------
+    separate_recovery_rate = model_config.get("separate_recovery_rate") or dataset_config.get("separate_recovery_rate", True)
 
     if ts_cols:
         ts_cols = list(ts_cols)
@@ -242,6 +246,10 @@ def create_inference_config(model_config_path, temp_pt_dir, temp_index_csv, zsco
         ts_cols.append("timeseries.hr_filtered")
     if use_acceleration and "timeseries.acc" not in ts_cols:
         ts_cols.append("timeseries.acc")
+    
+    # weighted_sleep_score: bool = True, 
+    #     normalization_type = "znorm", 
+    #     separate_recovery_rate: bool = False
 
     cfg = DatasetConfig(
         data_dir=temp_pt_dir,
@@ -268,6 +276,7 @@ def create_inference_config(model_config_path, temp_pt_dir, temp_index_csv, zsco
         normalization_type=normalization_type,
         use_recovery_rate_feature=use_recovery_rate_feature,
         weighted_sleep_score=weighted_sleep_score,
+        separate_recovery_rate=separate_recovery_rate
     )
 
     return cfg
