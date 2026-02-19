@@ -63,6 +63,11 @@ _metrics = {
     "last_overall_traj_mse": float("nan"),
     "last_day_start_mae": float("nan"),
     "last_day_end_mae": float("nan"),
+    # Multi-user: per-user and aggregate region metrics
+    # { user_id: {"mae": float, "rmse": float, "exercise_mae": float, ...} }
+    "per_user": {},
+    # mean across users in last batch run
+    "aggregate": {},
 }
 # Default paths (overridable via env vars or request body)
 DEFAULT_DATA_DIR = os.environ.get(
@@ -195,6 +200,29 @@ class FreshInferenceResponse(BaseModel):
     total_seconds: float = 0.0
     stages_completed: list[str] = []
     region_errors: dict = {}
+
+
+class BatchFreshInferenceRequest(BaseModel):
+    user_ids: list[str]           # 1–3 user IDs
+    from_date: str
+    to_date: str
+    model_dir: Optional[str] = None
+    data_dir: Optional[str] = None
+    zscores_file: Optional[str] = None
+    pull_mode: str = "ONLINE"
+    skip_pull: bool = False
+    skip_ground_truth: bool = False
+    per_user_metrics: bool = True  # store per-user breakdown in Prometheus
+
+
+class BatchFreshInferenceResponse(BaseModel):
+    user_ids: list[str]
+    from_date: str
+    to_date: str
+    results: list[dict]           # per-user result dicts
+    aggregate: dict               # mean metrics across all successful users
+    num_users_success: int
+    num_users_failed: int
 
 
 class ModelInfo(BaseModel):
@@ -348,8 +376,8 @@ async def fresh_inference(request: FreshInferenceRequest, fastapi_request: Reque
             pull_mode=request.pull_mode,
             skip_pull=request.skip_pull,
             skip_ground_truth=request.skip_ground_truth,
-            plot=request.plot
-            # predictor=predictor
+            plot=request.plot,
+            predictor=predictor,
         )
         elapsed = time.time() - start
         _metrics["fresh_inference_total"] += 1
@@ -412,6 +440,7 @@ async def fresh_inference_plot(request: FreshInferenceRequest, fastapi_request: 
             skip_pull=request.skip_pull,
             skip_ground_truth=request.skip_ground_truth,
             plot=False,
+            predictor=predictor,
         )
 
         # Generate trajectory plot with event annotations
@@ -461,6 +490,116 @@ async def fresh_inference_plot(request: FreshInferenceRequest, fastapi_request: 
     except Exception as e:
         _metrics["fresh_inference_errors"] += 1
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _collect_user_metrics(result: dict) -> dict:
+    """Extract the metrics we want to track per user from a fresh_inference result."""
+    region_errors = result.get("region_errors", {})
+    return {
+        "mae": result.get("mae", float("nan")),
+        "rmse": result.get("rmse", float("nan")),
+        "mse": result.get("mse", float("nan")),
+        "exercise_mae": region_errors.get("exercise_mae", float("nan")),
+        "sleep_mae": region_errors.get("sleep_mae", float("nan")),
+        "nap_mae": region_errors.get("nap_mae", float("nan")),
+        "non_wear_mae": region_errors.get("non_wear_mae", float("nan")),
+        "day_start_mae": region_errors.get("day_start_mae", float("nan")),
+        "day_end_mae": region_errors.get("day_end_mae", float("nan")),
+        "overall_traj_mae": region_errors.get("overall_traj_mae", float("nan")),
+    }
+
+
+def _compute_aggregate(per_user: dict) -> dict:
+    """Compute mean over all users, skipping NaN values."""
+    if not per_user:
+        return {}
+    import math
+    keys = list(next(iter(per_user.values())).keys())
+    agg = {}
+    for k in keys:
+        vals = [v[k] for v in per_user.values() if not (isinstance(v[k], float) and math.isnan(v[k]))]
+        agg[k] = sum(vals) / len(vals) if vals else float("nan")
+    return agg
+
+
+@app.post("/batch-fresh-inference", response_model=BatchFreshInferenceResponse)
+async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_request: Request):
+    """
+    Run fresh inference for multiple users (up to 3) sequentially.
+    Aggregates region-based errors as mean across all users.
+    When per_user_metrics=True, per-user breakdown is emitted to Prometheus.
+    """
+    from src.inference.fresh_inference import run_fresh_inference
+
+    predictor = fastapi_request.app.state.predictor
+    if predictor is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    user_ids = request.user_ids[:3]  # cap at 3
+    per_user_results = []
+    per_user_data = {}
+    failed = 0
+
+    for uid in user_ids:
+        try:
+            result = run_fresh_inference(
+                user_id=uid,
+                from_date=request.from_date,
+                to_date=request.to_date,
+                model_dir=request.model_dir or os.environ.get("MODEL_CHECKPOINT_DIR", "models/production"),
+                data_dir=request.data_dir or DEFAULT_FRESH_DATA_DIR,
+                zscores_file=request.zscores_file or DEFAULT_ZSCORES_FILE,
+                pull_mode=request.pull_mode,
+                skip_pull=request.skip_pull,
+                skip_ground_truth=request.skip_ground_truth,
+                plot=False,
+                predictor=predictor,
+            )
+            per_user_results.append({
+                "user_id": uid,
+                "mae": result["mae"],
+                "rmse": result["rmse"],
+                "mse": result["mse"],
+                "num_samples": result["num_samples"],
+                "region_errors": result.get("region_errors", {}),
+            })
+            per_user_data[uid] = _collect_user_metrics(result)
+            _metrics["fresh_inference_total"] += 1
+        except Exception as e:
+            logger.error("Batch inference failed for user %s: %s", uid, e)
+            _metrics["fresh_inference_errors"] += 1
+            failed += 1
+
+    aggregate = _compute_aggregate(per_user_data)
+    _metrics["aggregate"] = aggregate
+
+    if request.per_user_metrics:
+        _metrics["per_user"] = per_user_data
+    else:
+        _metrics["per_user"] = {}
+
+    # Update the flat metrics with aggregate values for backward compat
+    if aggregate:
+        _metrics["last_fresh_inference_mae"] = aggregate.get("mae", float("nan"))
+        _metrics["last_fresh_inference_rmse"] = aggregate.get("rmse", float("nan"))
+        _metrics["last_fresh_inference_mse"] = aggregate.get("mse", float("nan"))
+        _metrics["last_exercise_mae"] = aggregate.get("exercise_mae", float("nan"))
+        _metrics["last_sleep_mae"] = aggregate.get("sleep_mae", float("nan"))
+        _metrics["last_nap_mae"] = aggregate.get("nap_mae", float("nan"))
+        _metrics["last_nonwear_mae"] = aggregate.get("non_wear_mae", float("nan"))
+        _metrics["last_day_start_mae"] = aggregate.get("day_start_mae", float("nan"))
+        _metrics["last_day_end_mae"] = aggregate.get("day_end_mae", float("nan"))
+        _metrics["last_overall_traj_mae"] = aggregate.get("overall_traj_mae", float("nan"))
+
+    return BatchFreshInferenceResponse(
+        user_ids=user_ids,
+        from_date=request.from_date,
+        to_date=request.to_date,
+        results=per_user_results,
+        aggregate=aggregate,
+        num_users_success=len(per_user_results),
+        num_users_failed=failed,
+    )
 
 
 @app.get("/model-info", response_model=ModelInfo)
@@ -602,4 +741,67 @@ async def metrics(request: Request):
                 f"{metric_name} {val:.6f}",
                 "",
             ])
+
+    # ---- Labelled multi-user metrics ----
+    # biocharge_region_mae{region="...", user_id="..."} and
+    # biocharge_user_inference_mae{user_id="..."}
+    import math
+
+    # region key → label value mapping
+    region_label_map = [
+        ("exercise_mae", "exercise"),
+        ("sleep_mae", "sleep"),
+        ("nap_mae", "nap"),
+        ("non_wear_mae", "non_wear"),
+        ("day_start_mae", "day_start"),
+        ("day_end_mae", "day_end"),
+        ("overall_traj_mae", "overall_traj"),
+    ]
+
+    aggregate = _metrics.get("aggregate", {})
+    per_user = _metrics.get("per_user", {})
+
+    if aggregate or per_user:
+        lines.extend([
+            "# HELP biocharge_region_mae Region MAE by event type and user",
+            "# TYPE biocharge_region_mae gauge",
+        ])
+        for field_key, region_label in region_label_map:
+            # aggregate row (user_id="all")
+            agg_val = aggregate.get(field_key, float("nan"))
+            if not math.isnan(agg_val):
+                lines.append(f'biocharge_region_mae{{region="{region_label}",user_id="all"}} {agg_val:.6f}')
+            # per-user rows
+            for uid, udata in per_user.items():
+                u_val = udata.get(field_key, float("nan"))
+                if not math.isnan(u_val):
+                    lines.append(f'biocharge_region_mae{{region="{region_label}",user_id="{uid}"}} {u_val:.6f}')
+        lines.append("")
+
+        lines.extend([
+            "# HELP biocharge_user_inference_mae Fresh inference MAE per user",
+            "# TYPE biocharge_user_inference_mae gauge",
+        ])
+        agg_mae = aggregate.get("mae", float("nan"))
+        if not math.isnan(agg_mae):
+            lines.append(f'biocharge_user_inference_mae{{user_id="all"}} {agg_mae:.6f}')
+        for uid, udata in per_user.items():
+            u_mae = udata.get("mae", float("nan"))
+            if not math.isnan(u_mae):
+                lines.append(f'biocharge_user_inference_mae{{user_id="{uid}"}} {u_mae:.6f}')
+        lines.append("")
+
+        lines.extend([
+            "# HELP biocharge_user_inference_rmse Fresh inference RMSE per user",
+            "# TYPE biocharge_user_inference_rmse gauge",
+        ])
+        agg_rmse = aggregate.get("rmse", float("nan"))
+        if not math.isnan(agg_rmse):
+            lines.append(f'biocharge_user_inference_rmse{{user_id="all"}} {agg_rmse:.6f}')
+        for uid, udata in per_user.items():
+            u_rmse = udata.get("rmse", float("nan"))
+            if not math.isnan(u_rmse):
+                lines.append(f'biocharge_user_inference_rmse{{user_id="{uid}"}} {u_rmse:.6f}')
+        lines.append("")
+
     return Response(content="\n".join(lines), media_type="text/plain")

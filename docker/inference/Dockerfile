@@ -25,6 +25,7 @@ COPY src/training/model.py src/training/model.py
 COPY src/training/dataset_delta_v2.py src/training/dataset_delta_v2.py
 COPY src/training/utils.py src/training/utils.py
 COPY src/inference/ src/inference/
+COPY src/data_ingestion/ src/data_ingestion/
 
 ENV PYTHONPATH=/app
 

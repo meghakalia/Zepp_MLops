@@ -85,8 +85,10 @@ services:
     env_file:
       - .env
     environment:
-      - MODEL_CHECKPOINT_DIR=/app/models/production
+      - MODEL_CHECKPOINT_DIR=/app/models/production/dual_head_no_weighted_loss
       - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - BIOCHARGE_FRESH_DATA_DIR=/app/data
+      - BIOCHARGE_ZSCORES_FILE=/app/data/source/updated_z_score_user.json
     depends_on:
       mlflow:
         condition: service_healthy

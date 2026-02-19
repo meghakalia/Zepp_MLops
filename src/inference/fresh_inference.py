@@ -70,6 +70,7 @@ def run_fresh_inference(
     skip_ground_truth: bool = False,
     plot: bool = False,
     output_dir: str = "outputs",
+    predictor=None,
 ) -> dict:
     """
     End-to-end fresh data inference pipeline.
@@ -104,15 +105,11 @@ def run_fresh_inference(
     # from src.inference.charge_analytics import compute_biocharge_ground_truth
     # from src.inference.predictor import BiochargePredictor
 
-    # Try absolute imports first, fallback to relative for debugging
+    # Always-needed imports (inference module is always available)
     try:
-        from src.data_ingestion.puller import pull_user_data
-        from src.inference.charge_analytics import compute_biocharge_ground_truth
         from src.inference.predictor import BiochargePredictor
         from src.inference.plotting import generate_trajectory_plot
     except ModuleNotFoundError:
-        from data_ingestion.puller import pull_user_data
-        from inference.charge_analytics import compute_biocharge_ground_truth
         from inference.predictor import BiochargePredictor
         from inference.plotting import generate_trajectory_plot
 
@@ -127,6 +124,10 @@ def run_fresh_inference(
         if skip_pull:
             print("Skipping data pull (--skip_pull)")
         else:
+            try:
+                from src.data_ingestion.puller import pull_user_data
+            except ModuleNotFoundError:
+                from data_ingestion.puller import pull_user_data
             print(f"Pulling data for user {user_id} from {from_date} to {to_date} (mode={pull_mode})")
             pull_result = pull_user_data(
                 userid=user_id,
@@ -179,6 +180,10 @@ def run_fresh_inference(
         else:
             result_path = os.path.join(temp_dir, "processed")
             print(f"Computing biocharge analytical values for user {user_id}...")
+            try:
+                from src.inference.charge_analytics import compute_biocharge_ground_truth
+            except ModuleNotFoundError:
+                from inference.charge_analytics import compute_biocharge_ground_truth
             processed_excel = compute_biocharge_ground_truth(
                 user_id=user_id,
                 data_folder=raw_data_folder,
@@ -202,8 +207,8 @@ def run_fresh_inference(
         dates = _generate_date_list(from_date, to_date)
         print(f"Running autoregressive inference for {len(dates)} dates...")
 
-        # predictor = BiochargePredictor(checkpoint_dir=model_dir)
-        predictor = BiochargePredictor(checkpoint_dir=model_dir)
+        if predictor is None:
+            predictor = BiochargePredictor(checkpoint_dir=model_dir)
         results = predictor.run_inference_for_user(
             user_id=user_id,
             dates=dates,
