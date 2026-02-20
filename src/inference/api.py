@@ -658,10 +658,11 @@ def _log_plots_to_mlflow(
                     if isinstance(v, float) and not math.isnan(v):
                         mlflow.log_metric(f"user_{uid}_{k}", v)
 
-            # Plot artifacts
+            # Plot artifacts — filename encodes user + date range for easy identification
             with tempfile.TemporaryDirectory() as tmpdir:
                 for uid, png_bytes in per_user_plots.items():
-                    plot_path = os.path.join(tmpdir, f"user_{uid}_trajectory.png")
+                    plot_filename = f"user_{uid}_{from_date}_to_{to_date}_trajectory.png"
+                    plot_path = os.path.join(tmpdir, plot_filename)
                     with open(plot_path, "wb") as f:
                         f.write(png_bytes)
                     mlflow.log_artifact(plot_path, artifact_path="plots")

@@ -209,6 +209,7 @@ def run_fresh_inference(
 
         if predictor is None:
             predictor = BiochargePredictor(checkpoint_dir=model_dir)
+            
         results = predictor.run_inference_for_user(
             user_id=user_id,
             dates=dates,

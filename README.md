@@ -49,6 +49,65 @@ open frontend/index.html
 
 ---
 
+## Starting the Backend and Frontend (Step by Step)
+
+### Backend (FastAPI inference server)
+
+**Option A — Docker (recommended)**
+
+1. Copy the environment file and fill in any required values:
+   ```bash
+   cp .env.example .env
+   ```
+2. Start the inference backend (and supporting services):
+   ```bash
+   docker compose up -d
+   ```
+3. Confirm the server is healthy:
+   ```bash
+   curl http://localhost:8000/health
+   ```
+   You should see `{"status":"ok", ...}`.
+
+**Option B — Local Python (no Docker)**
+
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Set required environment variables (or copy `.env.example` to `.env` and source it):
+   ```bash
+   cp .env.example .env
+   # edit .env with your model path and data paths, then:
+   source .env
+   ```
+3. Start the FastAPI server:
+   ```bash
+   uvicorn src.inference.api:app --host 0.0.0.0 --port 8000
+   ```
+4. Confirm the server is healthy:
+   ```bash
+   curl http://localhost:8000/health
+   ```
+
+---
+
+### Frontend
+
+The frontend is a single static HTML file — no build step or server required.
+
+1. Make sure the backend is running on `http://localhost:8000` (see above).
+2. Open the frontend in your browser:
+   ```bash
+   open frontend/index.html        # macOS
+   # or double-click the file in Finder / File Explorer
+   ```
+3. The UI will load and connect to the backend automatically.
+
+> If you see CORS or connection errors, check that the backend is running and accessible on port 8000.
+
+---
+
 ## Project Structure
 
 ```

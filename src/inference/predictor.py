@@ -49,10 +49,8 @@ COLUMNS_TO_READ = [
     "charge.timeseries",
     "timeseries.hr_available",
     "timeseries.hr_available_5",
-    "timeseries.hr",  # fallback for hr_filtered
+    "timeseries.hr"  # fallback for hr_filtered
 ]
-
-
 def safe_parse(x):
     """Parse data that may be string, numeric, or NaN into a list."""
     if pd.isna(x):

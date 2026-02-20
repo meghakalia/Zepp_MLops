@@ -1716,6 +1716,20 @@ def calculate_one_day(timeseries_sheet, sheet, daily_data, daily_row, yesterday_
     daily_data.at[current_data_index, "timeseries.min_status_list"] = str(min_status_list)
     daily_data.at[current_data_index, "timeseries.hrr_minute_list"] = str([round(float(hrr), 4) for hrr in hrr_minute_list])
     daily_data.at[current_data_index, "timeseries.full_stress_list"] = str([round(float(val), 4) for val in full_stress_list])
+
+    # hrr_raw is the same HRR% series as hrr_minute_list (name expected by the model/model_config)
+    daily_data.at[current_data_index, "timeseries.hrr_raw"] = str([round(float(hrr), 4) for hrr in hrr_minute_list])
+
+    # hr_filtered: valid HR values (20 < hr < 220, device worn); 255 for invalid/off-wrist minutes
+    # The dataset layer converts values > 240 to the -6.0 missing sentinel during training/inference
+    hr_filtered = [round(float(hr_list[i]), 2) if (20 < hr_list[i] < 220 and min_status_list[i] == 0) else 255 for i in range(len(hr_list))]
+    daily_data.at[current_data_index, "timeseries.hr_filtered"] = str(hr_filtered)
+
+    # acc: per-minute acceleration/activity from the raw 'active' column
+    daily_data.at[current_data_index, "timeseries.acc"] = str(list(timeseries_sheet['active']))
+
+    # sleep_stage: per-minute sleep stage after firmware code mapping {4→2 deep, 8→1 light, 5→0 REM, else→-1}
+    daily_data.at[current_data_index, "sleep_stage"] = str([int(s) for s in timeseries_sheet['sleep_stage']])
     daily_data.at[current_data_index, "heart.hr_max"] = str(hr_max)
     daily_data.at[current_data_index, "heart.rhr"] = str(rhr)
 

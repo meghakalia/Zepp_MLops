@@ -212,7 +212,10 @@
 
         <!-- User IDs -->
         <div>
-            <label for="user-ids">User IDs (JSON Array)</label>
+            <div style="display: flex; justify-content: space-between; align-items: baseline;">
+                <label for="user-ids">User IDs (JSON Array)</label>
+                <button id="btn-clear" class="btn-nav" style="padding: 4px 10px; font-size: 0.8em;">Clear</button>
+            </div>
             <textarea id="user-ids" placeholder='["user1", "user2"]'></textarea>
             <div id="user-ids-error" class="error">Invalid JSON. Please enter a valid JSON array.</div>
         </div>
@@ -266,6 +269,7 @@
         const btnInfer = document.getElementById('btn-infer');
         const btnMlflow = document.getElementById('btn-mlflow');
         const btnGrafana = document.getElementById('btn-grafana');
+        const btnClear = document.getElementById('btn-clear');
         const savePlotsCheckbox = document.getElementById('save-plots');
         const statusArea = document.getElementById('status-area');
 
@@ -365,6 +369,11 @@
                 save_plots_mlflow: savePlotsCheckbox.checked
             };
 
+            // Save to localStorage
+            localStorage.setItem('lastUserIds', userIdsInput.value);
+            localStorage.setItem('lastFromDate', fromDateInput.value);
+            localStorage.setItem('lastToDate', toDateInput.value);
+
             const button = document.getElementById(buttonId);
             setLoading(button, true, originalText);
             logStatus(`Sending request to ${endpoint}...`);
@@ -397,18 +406,32 @@
         btnInfer.addEventListener('click', () => makeRequest('/batch-inference', 'btn-infer', 'Run Inference'));
 
         btnMlflow.addEventListener('click', () => {
-            window.open(`${BASE_URL}/mlflow`, '_blank');
+            window.open('http://localhost:5000', '_blank');
         });
 
         btnGrafana.addEventListener('click', () => {
-            window.open(`${BASE_URL}/grafana`, '_blank');
+            window.open('http://localhost:3000', '_blank');
         });
 
-        // Initialize Defaults (Optional)
-        // Set today's date?
-        const today = new Date().toISOString().split('T')[0];
-        // toDateInput.value = today; 
-        // fromDateInput.value = today; 
+        btnClear.addEventListener('click', () => {
+            userIdsInput.value = '';
+            fromDateInput.value = '';
+            toDateInput.value = '';
+            localStorage.removeItem('lastUserIds');
+            localStorage.removeItem('lastFromDate');
+            localStorage.removeItem('lastToDate');
+        });
+
+        // Initialize Defaults
+        window.addEventListener('DOMContentLoaded', () => {
+            const lastUserIds = localStorage.getItem('lastUserIds');
+            const lastFromDate = localStorage.getItem('lastFromDate');
+            const lastToDate = localStorage.getItem('lastToDate');
+
+            if (lastUserIds) userIdsInput.value = lastUserIds;
+            if (lastFromDate) fromDateInput.value = lastFromDate;
+            if (lastToDate) toDateInput.value = lastToDate;
+        });
     </script>
 </body>
 
