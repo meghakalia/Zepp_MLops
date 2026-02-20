@@ -134,6 +134,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 
 # ---------------------------------------------------------------------------
 # Request / Response models
@@ -222,6 +233,7 @@ class BatchFreshInferenceRequest(BaseModel):
     save_plots_mlflow: bool = False  # log per-user trajectory plots to MLflow as artifacts
 
 
+
 class BatchFreshInferenceResponse(BaseModel):
     user_ids: list[str]
     from_date: str
@@ -232,11 +244,28 @@ class BatchFreshInferenceResponse(BaseModel):
     num_users_failed: int
 
 
+class PullRequest(BaseModel):
+    user_ids: list[str]
+    from_date: str
+    to_date: str
+    mode: str = "ONLINE"
+
+
+class PullResponse(BaseModel):
+    user_ids: list[str]
+    from_date: str
+    to_date: str
+    results: dict[str, bool]  # user_id -> success
+    num_success: int
+    num_failed: int
+
+
 class ModelInfo(BaseModel):
     status: str
     model_type: str
     device: str
     config: dict
+
 
 
 # ---------------------------------------------------------------------------
@@ -743,6 +772,59 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
         num_users_success=len(per_user_results),
         num_users_failed=failed,
     )
+
+
+@app.post("/pull", response_model=PullResponse)
+async def pull_data(request: PullRequest):
+    """
+    Pull data for multiple users.
+    """
+    from src.data_ingestion.puller import pull_multiple_users
+
+
+    # Prepare configs for puller
+    configs = [
+        {
+            "userid": uid,
+            "from_date": request.from_date,
+            "to_date": request.to_date
+        }
+        for uid in request.user_ids
+    ]
+
+    try:
+        # We can use the default data dir from api.py or let puller decide
+        # puller.py signature: pull_multiple_users(user_configs, data_dir, mode, max_workers)
+        # We'll use DEFAULT_FRESH_DATA_DIR from this file
+        
+        # Note: DEFAULT_FRESH_DATA_DIR might be defined globally in api.py
+        # If not visible here, request.app.state... or just import/use constant
+        # It is defined near top of api.py
+        
+        results_map = pull_multiple_users(
+            user_configs=configs,
+            data_dir=DEFAULT_FRESH_DATA_DIR,
+            mode=request.mode,
+        )
+
+        # Convert results_map (uid -> data or None) to success bools
+        results_bool = {uid: (data is not None) for uid, data in results_map.items()}
+        num_success = sum(results_bool.values())
+        num_failed = len(results_bool) - num_success
+
+        return PullResponse(
+            user_ids=request.user_ids,
+            from_date=request.from_date,
+            to_date=request.to_date,
+            results=results_bool,
+            num_success=num_success,
+            num_failed=num_failed,
+        )
+
+    except Exception as e:
+        logger.error("Pull failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/model-info", response_model=ModelInfo)

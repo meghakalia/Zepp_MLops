@@ -84,6 +84,7 @@ services:
     volumes:
       - ./models:/app/models:ro
       - ./data:/app/data
+      - ./src:/app/src
     env_file:
       - .env
     environment:

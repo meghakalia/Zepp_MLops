@@ -386,7 +386,7 @@
 
         // Event Listeners
         btnPull.addEventListener('click', () => makeRequest('/pull', 'btn-pull', 'Pull Data'));
-        btnInfer.addEventListener('click', () => makeRequest('/infer', 'btn-infer', 'Run Inference'));
+        btnInfer.addEventListener('click', () => makeRequest('/batch-fresh-inference', 'btn-infer', 'Run Inference'));
 
         btnMlflow.addEventListener('click', () => {
             window.open(`${BASE_URL}/mlflow`, '_blank');
