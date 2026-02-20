@@ -9,8 +9,11 @@ Endpoints:
     POST /autoregressive/plot - Same as above, returns PNG plot
     POST /fresh-inference     - Full pipeline: pull data -> ground truth -> inference
     POST /fresh-inference/plot - Same as above, returns PNG plot
+    POST /batch-inference     - Inference only (no pull) for multiple users — call /pull first
     GET  /model-info          - Current model info
     GET  /metrics             - Prometheus metrics (for Grafana)
+    GET  /mlflow              - Redirect to MLflow UI (port 5000)
+    GET  /grafana             - Redirect to Grafana UI (port 3000)
 """
 
 import logging
@@ -21,6 +24,7 @@ from typing import Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Response, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from src.inference.predictor import BiochargePredictor
@@ -774,6 +778,107 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
     )
 
 
+@app.post("/batch-inference", response_model=BatchFreshInferenceResponse)
+async def batch_inference(request: BatchFreshInferenceRequest, fastapi_request: Request):
+    """
+    Run inference for multiple users using already-pulled local data (never pulls).
+    Identical to /batch-fresh-inference but always skips the data pull step.
+    Use /pull first to fetch data, then call this endpoint.
+    """
+    from src.inference.fresh_inference import run_fresh_inference
+
+    predictor = fastapi_request.app.state.predictor
+    if predictor is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    user_ids = request.user_ids
+    per_user_results = []
+    per_user_data = {}
+    per_user_plots: dict = {}
+    failed = 0
+
+    for uid in user_ids:
+        try:
+            result = run_fresh_inference(
+                user_id=uid,
+                from_date=request.from_date,
+                to_date=request.to_date,
+                model_dir=request.model_dir or os.environ.get("MODEL_CHECKPOINT_DIR", "models/production"),
+                data_dir=request.data_dir or DEFAULT_FRESH_DATA_DIR,
+                zscores_file=request.zscores_file or DEFAULT_ZSCORES_FILE,
+                pull_mode=request.pull_mode,
+                skip_pull=True,  # always skip pull — use /pull endpoint to fetch data
+                skip_ground_truth=request.skip_ground_truth,
+                plot=request.save_plots_mlflow,
+                output_dir=os.path.join(request.data_dir or DEFAULT_FRESH_DATA_DIR, "plots"),
+                predictor=predictor,
+            )
+            per_user_results.append({
+                "user_id": uid,
+                "mae": result["mae"],
+                "rmse": result["rmse"],
+                "mse": result["mse"],
+                "num_samples": result["num_samples"],
+                "region_errors": result.get("region_errors", {}),
+            })
+            per_user_data[uid] = _collect_user_metrics(result)
+            _metrics["fresh_inference_total"] += 1
+
+            if request.save_plots_mlflow:
+                png_bytes = result.get("plot_bytes")
+                if png_bytes:
+                    per_user_plots[uid] = png_bytes
+                else:
+                    logger.warning("No plot bytes returned for user %s", uid)
+        except Exception as e:
+            logger.error("Batch inference failed for user %s: %s", uid, e)
+            _metrics["fresh_inference_errors"] += 1
+            failed += 1
+
+    aggregate = _compute_aggregate(per_user_data)
+    _metrics["aggregate"] = aggregate
+
+    if request.per_user_metrics:
+        _metrics["per_user"] = per_user_data
+    else:
+        _metrics["per_user"] = {}
+
+    if aggregate:
+        _metrics["last_fresh_inference_mae"] = aggregate.get("mae", float("nan"))
+        _metrics["last_fresh_inference_rmse"] = aggregate.get("rmse", float("nan"))
+        _metrics["last_fresh_inference_mse"] = aggregate.get("mse", float("nan"))
+        _metrics["last_exercise_mae"] = aggregate.get("exercise_mae", float("nan"))
+        _metrics["last_sleep_mae"] = aggregate.get("sleep_mae", float("nan"))
+        _metrics["last_nap_mae"] = aggregate.get("nap_mae", float("nan"))
+        _metrics["last_nonwear_mae"] = aggregate.get("non_wear_mae", float("nan"))
+        _metrics["last_day_start_mae"] = aggregate.get("day_start_mae", float("nan"))
+        _metrics["last_day_end_mae"] = aggregate.get("day_end_mae", float("nan"))
+        _metrics["last_overall_traj_mae"] = aggregate.get("overall_traj_mae", float("nan"))
+
+    if request.save_plots_mlflow and per_user_plots:
+        try:
+            _log_plots_to_mlflow(
+                run_name=f"batch_inference_{request.from_date}_{request.to_date}",
+                from_date=request.from_date,
+                to_date=request.to_date,
+                per_user_plots=per_user_plots,
+                aggregate=aggregate,
+                per_user_data=per_user_data,
+            )
+        except Exception as e:
+            logger.error("MLflow plot logging failed: %s", e)
+
+    return BatchFreshInferenceResponse(
+        user_ids=user_ids,
+        from_date=request.from_date,
+        to_date=request.to_date,
+        results=per_user_results,
+        aggregate=aggregate,
+        num_users_success=len(per_user_results),
+        num_users_failed=failed,
+    )
+
+
 @app.post("/pull", response_model=PullResponse)
 async def pull_data(request: PullRequest):
     """
@@ -1058,3 +1163,15 @@ async def metrics(request: Request):
         lines.append("")
 
     return Response(content="\n".join(lines), media_type="text/plain")
+
+
+@app.get("/mlflow")
+async def mlflow_redirect():
+    """Redirect to MLflow UI (port 5000)."""
+    return RedirectResponse(url="http://localhost:5000", status_code=302)
+
+
+@app.get("/grafana")
+async def grafana_redirect():
+    """Redirect to Grafana UI (port 3000)."""
+    return RedirectResponse(url="http://localhost:3000", status_code=302)
