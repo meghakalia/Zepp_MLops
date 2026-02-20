@@ -1,368 +1,185 @@
-# Biocharge MLOps — Inference Guide
+# Biocharge MLOps
 
-Step-by-step instructions for running biocharge inference using the dual-head model.
-
-## Prerequisites
-
-1. **Python 3.12+**
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. **Model checkpoint** at `models/production/dual_head_no_weighted_loss/` containing:
-   - `model_config.json`
-   - `best_model_*.pt`
-4. **Z-score file** at `data/source/updated_z_score_user.json`
+End-to-end MLOps pipeline for biocharge (wellness) prediction. Pulls wearable data from Xiaomi/Huami APIs, trains a PyTorch neural network, serves predictions via REST API, and monitors results in Grafana/MLflow.
 
 ---
 
-## Option A: Docker (recommended)
+## Quick Start
 
-Runs the full stack: FastAPI + Prometheus + Grafana.
+### 1. Prerequisites
 
-### Start
+- Docker + Docker Compose
+- Model checkpoint in `models/production/dual_head_no_weighted_loss/`
+- Z-score file at `data/source/updated_z_score_user.json`
+- Processed user Excel files in `data/source/z_norm_rhr_hrv_7_14_corrected_complete_original/`
+
+### 2. Start all services
 
 ```bash
-docker compose build inference
 docker compose up -d
 ```
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
+| Frontend | open `frontend/index.html` in browser | — |
 | FastAPI | http://localhost:8000/docs | — |
+| MLflow | http://localhost:5000 | — |
 | Grafana | http://localhost:3000 | admin / admin |
 | Prometheus | http://localhost:9090 | — |
-| MLflow | http://localhost:5000 | — |
+| Prefect | http://localhost:4200 | — |
 
-### Stored data (processed Excel already exists)
+### 3. Open the frontend
 
-Place `{user_id}_processed.xlsx` in `./data/source/z_norm_rhr_hrv_7_14_corrected_complete_original/` (mounted to `/app/data/` inside the container), then call:
+Just open the file directly in your browser — no server needed:
 
 ```bash
-# Single user
-curl -X POST http://localhost:8000/fresh-inference \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "1000836634",
-    "from_date": "2025-03-01",
-    "to_date": "2025-03-03",
-    "data_dir": "/app/data/source/z_norm_rhr_hrv_7_14_corrected_complete_original",
-    "skip_pull": true,
-    "skip_ground_truth": true
-  }'
-
-# Up to 3 users (batch)
-curl -X POST http://localhost:8000/batch-fresh-inference \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_ids": ["1000836634", "1000263101", "1001234567"],
-    "from_date": "2025-03-01",
-    "to_date": "2025-03-03",
-    "data_dir": "/app/data/source/z_norm_rhr_hrv_7_14_corrected_complete_original",
-    "skip_pull": true,
-    "skip_ground_truth": true,
-    "per_user_metrics": true
-  }'
+open frontend/index.html
 ```
 
-`per_user_metrics: true` exposes per-user region errors in Grafana (see [Grafana section](#grafana-dashboard)).
+### 4. Use the UI
 
-### Rebuild after code changes
+1. Enter **User IDs** as a JSON array, e.g. `["1000836634", "1006877628"]`
+2. Set **From Date** and **To Date** (YYYY-MM-DD)
+3. Click **Pull Data** — fetches raw wearable data for those users and dates
+4. Click **Run Inference** — runs the ML model on the pulled data and logs results to MLflow
+5. Check **Save plots to MLflow** before running inference to also attach trajectory plot PNGs to the MLflow run
+6. Click **MLflow** or **Grafana** to open those dashboards
 
-```bash
-docker compose build inference && docker compose up -d inference
+> Pull and inference are separate steps. Always pull first, then run inference.
+
+---
+
+## Project Structure
+
+```
+biocharge-mlops/
+├── frontend/
+│   └── index.html                  # Single-page dashboard UI
+│
+├── src/
+│   ├── data_ingestion/             # Pull raw data from Xiaomi/Huami API
+│   │   ├── pull_biocharge_data.py
+│   │   └── puller.py
+│   │
+│   ├── training/                   # Model architecture, dataset, training loop
+│   │   ├── model.py
+│   │   ├── dataset_delta_v2.py
+│   │   ├── trainer.py
+│   │   └── utils.py
+│   │
+│   ├── inference/                  # Prediction serving
+│   │   ├── api.py                  # FastAPI app (all REST endpoints)
+│   │   ├── predictor.py            # Model loading + feature normalisation
+│   │   ├── fresh_inference.py      # End-to-end pipeline: pull → ground truth → predict
+│   │   ├── run_inference.py        # Autoregressive day-by-day inference
+│   │   ├── plotting.py             # Trajectory plot generation
+│   │   └── charge_analytics/       # Domain ground truth computation
+│   │
+│   └── pipelines/                  # Prefect orchestration flows
+│       ├── local_train_flow.py
+│       ├── train_flow.py
+│       ├── data_flow.py
+│       ├── inference_flow.py
+│       └── full_flow.py
+│
+├── models/
+│   └── production/                 # Model checkpoints and config
+│
+├── data/
+│   ├── raw/                        # Raw pulled data (CSV per user/date)
+│   ├── source/                     # Processed Excel files + z-score JSON
+│   └── plots/                      # Saved trajectory PNGs
+│
+├── monitoring/
+│   ├── prometheus/                 # Scrape config
+│   └── grafana/                    # Dashboard + provisioning
+│
+├── config/
+│   └── local_data.yaml             # Local training config
+│
+├── docker-compose.yml
+├── Makefile
+└── requirements.txt
 ```
 
 ---
 
-## Option B: CLI (local)
+## Component Overview
 
-### Full pipeline (pulls data from API)
-
-```bash
-python -m src.inference.fresh_inference \
-    --user_id 1000836634 \
-    --from_date 2025-03-01 \
-    --to_date 2025-03-15 \
-    --model_dir models/production/dual_head_no_weighted_loss \
-    --pull_mode ONLINE
-```
-
-Requires `XIAOMI_SUPERTOKEN` (and optionally `XIAOMI_TOKEN`) in your environment.
-
-### Skip data pull (raw data already in `./data/raw/`)
-
-```bash
-python -m src.inference.fresh_inference \
-    --user_id 1000836634 \
-    --from_date 2025-03-15 \
-    --to_date 2025-03-16 \
-    --model_dir models/production/dual_head_no_weighted_loss \
-    --skip_pull
-```
-
-### Skip pull + ground truth (processed Excel already exists)
-
-```bash
-python -m src.inference.fresh_inference \
-    --user_id 1000836634 \
-    --from_date 2025-03-15 \
-    --to_date 2025-03-16 \
-    --model_dir models/production/dual_head_no_weighted_loss \
-    --data_dir data/source/z_norm_rhr_hrv_7_14_corrected_complete_original \
-    --skip_pull \
-    --skip_ground_truth
-```
-
-### All CLI flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--user_id` | `1000836634` | User ID |
-| `--from_date` | `2025-03-15` | Start date (YYYY-MM-DD) |
-| `--to_date` | `2025-03-16` | End date (YYYY-MM-DD) |
-| `--model_dir` | `models/production/dual_head_no_weighted_loss` | Model checkpoint directory |
-| `--data_dir` | `./data` | Directory containing `{user_id}_processed.xlsx` |
-| `--zscores_file` | `data/source/updated_z_score_user.json` | Z-score normalization JSON |
-| `--pull_mode` | `OFFLINE` | `ONLINE` (API) or `OFFLINE` (local files) |
-| `--skip_pull` | off | Skip data pull stage |
-| `--skip_ground_truth` | off | Skip ground truth computation |
-| `--plot` | off | Save trajectory plot PNG to `--output_dir` |
-| `--output_dir` | `outputs` | Plot output directory |
-| `--verbose` | off | Enable debug logging |
+| Component | Description |
+|-----------|-------------|
+| **frontend/index.html** | Minimal single-page UI. Pull data and run inference for a set of users over a date range. Links to MLflow and Grafana. |
+| **src/data_ingestion** | Pulls raw health metrics (HR, HRV, sleep, activity) from the Xiaomi/Huami API. Supports online (API) and offline (local file) modes. |
+| **src/training/model.py** | PyTorch neural networks. `MLP_delta` is the primary model; `GatedDualHeadMLP` adds separate heads for physical and mental biocharge. |
+| **src/training/dataset_delta_v2.py** | Dataset pipeline — z-score normalisation, windowed features, positional encoding, augmentation. |
+| **src/training/trainer.py** | Training loop with MLflow logging, early stopping, and checkpointing. |
+| **src/inference/api.py** | FastAPI server. Key endpoints: `/pull` (fetch data), `/batch-inference` (run model on pulled data), `/mlflow`, `/grafana`. |
+| **src/inference/predictor.py** | Loads a model checkpoint and handles feature normalisation for inference. |
+| **src/inference/fresh_inference.py** | Orchestrates the full per-user pipeline: pull → compute ground truth → run ML inference. |
+| **src/inference/charge_analytics** | Analytical ground truth engine — computes mental/physical battery, HRV scores, sleep metrics from raw wearable data. |
+| **src/pipelines** | Prefect flows for scheduled data ingestion, training, and inference. |
+| **MLflow** | Tracks every inference run — metrics (MAE, RMSE per region), params, and optional trajectory plot artifacts. Experiment name: `biocharge-inference`. |
+| **Grafana** | Live dashboards fed by Prometheus. Shows service health, aggregate region MAE, quality over time, and per-user breakdown. |
+| **Prometheus** | Scrapes `/metrics` on the inference API every 15 s. Stores time-series for Grafana. |
+| **Prefect** | Pipeline orchestration with retry logic for API calls. UI at port 4200. |
 
 ---
 
-## Option C: Python API
-
-```python
-from src.inference.fresh_inference import run_fresh_inference
-
-results = run_fresh_inference(
-    user_id="1000836634",
-    from_date="2025-03-01",
-    to_date="2025-03-15",
-    model_dir="models/production/dual_head_no_weighted_loss",
-    data_dir="data/source/z_norm_rhr_hrv_7_14_corrected_complete_original",
-    skip_pull=True,
-    skip_ground_truth=True,
-)
-
-print(results["mae"], results["rmse"])
-print(results["region_errors"])   # exercise, sleep, nap, non_wear, day_start, day_end
-```
-
-Returned dict keys: `user_id`, `dates`, `num_samples`, `preds`, `targets`, `mae`, `mse`, `rmse`, `pred_range`, `target_range`, `processed_excel_path`, `region_errors`, `plot_path` (if plot=True).
-
----
-
-## FastAPI Endpoints
-
-Start locally (outside Docker):
-
-```bash
-MODEL_CHECKPOINT_DIR=models/production/dual_head_no_weighted_loss \
-uvicorn src.inference.api:app --host 0.0.0.0 --port 8000
-```
+## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Health check + model loaded status |
-| `/model-info` | GET | Model type, device, config |
-| `/metrics` | GET | Prometheus metrics |
-| `/predict` | POST | Single feature vector → delta |
-| `/batch` | POST | Batch feature vectors → deltas |
-| `/autoregressive` | POST | Autoregressive inference for user + dates |
-| `/autoregressive/plot` | POST | Same, returns PNG |
-| `/fresh-inference` | POST | Full pipeline: pull → ground truth → inference (single user) |
+| `/health` | GET | Health check + model status |
+| `/pull` | POST | Fetch raw wearable data for a list of users |
+| `/batch-inference` | POST | Run inference on already-pulled data (no re-pull) |
+| `/batch-fresh-inference` | POST | Pull + inference in one call |
+| `/fresh-inference` | POST | Full pipeline for a single user |
 | `/fresh-inference/plot` | POST | Same, returns trajectory PNG |
-| `/batch-fresh-inference` | POST | Full pipeline for up to 3 users, returns aggregate + per-user metrics |
+| `/autoregressive` | POST | Autoregressive inference for a user + date range |
+| `/model-info` | GET | Loaded model type, device, config |
+| `/metrics` | GET | Prometheus metrics |
+| `/mlflow` | GET | Redirects to MLflow UI |
+| `/grafana` | GET | Redirects to Grafana UI |
 
-### Get trajectory plot
+---
+
+## Training
 
 ```bash
-curl -X POST http://localhost:8000/fresh-inference/plot \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "1000836634",
-    "from_date": "2025-03-15",
-    "to_date": "2025-03-16",
-    "data_dir": "data/source/z_norm_rhr_hrv_7_14_corrected_complete_original",
-    "skip_pull": true,
-    "skip_ground_truth": true
-  }' --output trajectory_plot.png
+# Train from local data (no API keys needed)
+make train-local
+
+# Train via Prefect (requires API credentials in .env)
+make train
+
+# Train with GPU
+make train-gpu
 ```
 
 ---
 
-## Grafana Dashboard
+## Common Commands
 
-Open http://localhost:3000 (admin / admin). The **Biocharge Inference Dashboard** has four sections:
-
-1. **Service Health** — model status, call counts, errors, latency
-2. **Aggregate Region MAE** — bargauge showing mean MAE across all users and all dates for each event type (exercise, sleep, nap, non-wear, day-start, day-end, overall trajectory)
-3. **Aggregate Quality Over Time** — timeseries of overall MAE/RMSE and key region MAEs
-4. **Per-User Region MAE** — use the **User** dropdown at the top to select one or more users; the bargauge updates to show per-user breakdown
-
-The per-user section is populated after a `/batch-fresh-inference` call with `per_user_metrics: true`.
-
-### Prometheus metrics emitted
-
-**Labelled (multi-user):**
-
-```
-biocharge_region_mae{region="exercise|sleep|nap|non_wear|day_start|day_end|overall_traj", user_id="<id>|all"}
-biocharge_user_inference_mae{user_id="<id>|all"}
-biocharge_user_inference_rmse{user_id="<id>|all"}
-```
-
-`user_id="all"` is the mean across all users in the last batch run.
-
-**Scalar (single-user / backward compat):**
-
-```
-biocharge_fresh_inference_mae/rmse/mse
-biocharge_exercise_mae, biocharge_sleep_mae, biocharge_nap_mae
-biocharge_nonwear_mae, biocharge_overall_traj_mae
-biocharge_day_start_mae, biocharge_day_end_mae
-biocharge_fresh_data_pull_seconds, biocharge_fresh_ground_truth_seconds, biocharge_fresh_ml_inference_seconds
+```bash
+make demo          # Start full stack
+make down          # Stop all services
+make serve         # Start inference API only
+make test-api      # Smoke test all endpoints
+make setup-data    # Copy local data from DeepBiocharge project
 ```
 
 ---
 
-## Pipeline Stages
+## Rebuild After Code Changes
 
-The fresh inference pipeline runs up to 4 stages:
-
-1. **Data Pull** — Fetches raw wearable data from Xiaomi/Huami API (skippable with `--skip_pull` / `skip_pull: true`)
-2. **Ground Truth** — Computes analytical biocharge values via the charge analytics engine (skippable with `--skip_ground_truth` / `skip_ground_truth: true`)
-3. **ML Inference** — Runs autoregressive prediction with GatedDualHeadMLP, computes region-based errors
-4. **Plot** (optional) — Generates trajectory curves with exercise/sleep/nap/non-wear annotations
-
----
-
-## Helper Commands
-
-### Check what's running
+Since `src/` is mounted as a live volume, most Python changes are picked up by restarting the container — no rebuild needed:
 
 ```bash
-# All Docker services and their status
-docker compose ps
-
-# Which ports are in use on the host
-lsof -i -P -n | grep LISTEN | grep -E "8000|9090|3000|5000|4200"
-
-# Logs for a specific service (last 50 lines)
-docker compose logs inference --tail=50
-docker compose logs grafana --tail=50
-docker compose logs prometheus --tail=50
-```
-
-### Health checks
-
-```bash
-# FastAPI
-curl -s http://localhost:8000/health
-
-# Which model is loaded
-curl -s http://localhost:8000/model-info | python3 -m json.tool
-
-# Check Prometheus is scraping correctly
-curl -s http://localhost:9090/api/v1/targets | python3 -c "
-import sys, json
-targets = json.load(sys.stdin)['data']['activeTargets']
-for t in targets: print(t['labels']['job'], '->', t['health'])
-"
-```
-
-### Stop services
-
-```bash
-# Stop everything (keeps volumes)
-docker compose down
-
-# Stop a single service
-docker compose stop inference
-
-# Stop and remove ALL containers + volumes (full reset)
-docker compose down -v
-```
-
-### Restart a service
-
-```bash
-# Restart just inference (picks up env var changes, no rebuild needed)
 docker compose restart inference
-
-# Restart the full monitoring stack
-docker compose restart prometheus grafana
 ```
 
-### When to rebuild vs restart
-
-| Situation | Command |
-|-----------|---------|
-| Changed Python code (`src/`) | `docker compose build inference && docker compose up -d inference` |
-| Changed `docker-compose.yml` env vars only | `docker compose up -d inference` (no rebuild) |
-| Changed `monitoring/grafana/dashboards/biocharge.json` | Just reload in browser — volume is mounted live |
-| Changed `monitoring/prometheus/prometheus.yml` | `docker compose restart prometheus` |
-| Changed `Dockerfile` | `docker compose build inference && docker compose up -d inference` |
-| Added new Python dependency | Add to `Dockerfile` RUN block, then rebuild |
-
-### Rebuild a single service
+Only rebuild if you change `Dockerfile` or add new dependencies:
 
 ```bash
-# Rebuild inference only (faster than rebuilding everything)
-docker compose build inference
-
-# Rebuild + restart in one step
 docker compose build inference && docker compose up -d inference
-
-# Force clean rebuild (no cache)
-docker compose build --no-cache inference
-```
-
-### Start individual services
-
-```bash
-# Start just the inference API + monitoring (skip Prefect + MLflow)
-docker compose up -d inference prometheus grafana
-
-# Start full stack
-docker compose up -d
-
-# Start with logs attached (Ctrl+C to stop)
-docker compose up inference
-```
-
-### Kill a local uvicorn process (if running outside Docker)
-
-```bash
-# Find and kill the process on port 8000
-kill $(lsof -ti :8000)
-
-# Or by process name
-pkill -f "uvicorn src.inference.api"
-```
-
----
-
-## Directory Structure
-
-```
-models/production/dual_head_no_weighted_loss/
-    model_config.json           # Model architecture + training config
-    best_model_*.pt             # Trained weights
-data/
-    source/
-        updated_z_score_user.json                          # Z-score normalization
-        z_norm_rhr_hrv_7_14_corrected_complete_original/   # Processed Excel files
-            {user_id}_processed.xlsx
-    raw/                                                   # Raw pulled data (Stage 1)
-        user_score_data/
-        user_sleep_data/
-outputs/                        # Plot output directory
-monitoring/
-    prometheus/prometheus.yml   # Scrapes inference:8000/metrics every 15s
-    grafana/dashboards/         # Auto-provisioned dashboard
 ```
