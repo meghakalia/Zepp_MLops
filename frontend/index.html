@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Biocharge MLOps Dashboard</title>
+    <style>
+        :root {
+            /* Solarized Dark Colors */
+            --base03: #002b36;
+            --base02: #073642;
+            --base01: #586e75;
+            --base00: #657b83;
+            --base0: #839496;
+            --base1: #93a1a1;
+            --base2: #eee8d5;
+            --base3: #fdf6e3;
+            --yellow: #b58900;
+            --orange: #cb4b16;
+            --red: #dc322f;
+            --magenta: #d33682;
+            --violet: #6c71c4;
+            --blue: #268bd2;
+            --cyan: #2aa198;
+            --green: #859900;
+        }
+
+        body {
+            background-color: var(--base03);
+            color: var(--base0);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .card {
+            background-color: var(--base02);
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 600px;
+            min-width: 320px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        h1 {
+            color: var(--base1);
+            text-align: center;
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-size: 1.5rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--base1);
+            font-weight: 600;
+        }
+
+        textarea,
+        .date-input {
+            width: 100%;
+            background-color: var(--base03);
+            border: 1px solid var(--base01);
+            color: var(--base0);
+            padding: 12px;
+            border-radius: 4px;
+            font-family: monospace;
+            box-sizing: border-box;
+            /* Ensure padding doesn't affect width */
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        textarea:focus,
+        .date-input:focus {
+            border-color: var(--blue);
+        }
+
+        textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+
+        .date-row {
+            display: flex;
+            gap: 20px;
+        }
+
+        .date-group {
+            flex: 1;
+        }
+
+        .button-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 1fr;
+            gap: 10px;
+        }
+
+        button {
+            padding: 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background-color 0.2s, transform 0.1s;
+            color: var(--base3);
+            /* Light text for better contrast on buttons */
+        }
+
+        button:active {
+            transform: translateY(1px);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* Action Buttons */
+        .btn-action {
+            background-color: var(--blue);
+        }
+
+        .btn-action:hover:not(:disabled) {
+            background-color: #2075b0;
+            /* Slightly darker blue */
+        }
+
+        /* Navigation Buttons */
+        .btn-nav {
+            background-color: var(--base01);
+            color: var(--base2);
+        }
+
+        .btn-nav:hover {
+            background-color: var(--base00);
+        }
+
+        #status-area {
+            background-color: var(--base03);
+            border: 1px solid var(--base01);
+            color: var(--base0);
+            padding: 15px;
+            border-radius: 4px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            word-break: break-all;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-size: 0.9em;
+        }
+
+        .error {
+            color: var(--red);
+            margin-top: 5px;
+            font-size: 0.9em;
+            display: none;
+            /* Hidden by default */
+        }
+
+        /* Loading spinner logic can be simple text change for now, or CSS spinner */
+        .spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        @media (max-width: 600px) {
+            .date-row {
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            .button-row {
+                grid-template-columns: 1fr 1fr;
+                /* Stack buttons 2x2 on small screens */
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="card">
+        <h1>Biocharge MLOps</h1>
+
+        <!-- User IDs -->
+        <div>
+            <label for="user-ids">User IDs (JSON Array)</label>
+            <textarea id="user-ids" placeholder='["user1", "user2"]'></textarea>
+            <div id="user-ids-error" class="error">Invalid JSON. Please enter a valid JSON array.</div>
+        </div>
+
+        <!-- Date Range -->
+        <div class="date-row">
+            <div class="date-group">
+                <label for="from-date">From Date</label>
+                <input type="text" id="from-date" class="date-input" placeholder="YYYY-MM-DD">
+                <div id="from-date-error" class="error">Invalid Date. Use YYYY-MM-DD.</div>
+            </div>
+            <div class="date-group">
+                <label for="to-date">To Date</label>
+                <input type="text" id="to-date" class="date-input" placeholder="YYYY-MM-DD">
+                <div id="to-date-error" class="error">Invalid Date. Use YYYY-MM-DD.</div>
+            </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="button-row">
+            <button id="btn-pull" class="btn-action">Pull Data</button>
+            <button id="btn-infer" class="btn-action">Run Inference</button>
+            <button id="btn-mlflow" class="btn-nav">MLflow</button>
+            <button id="btn-grafana" class="btn-nav">Grafana</button>
+        </div>
+
+        <!-- Status -->
+        <div>
+            <label for="status-area">Status / Output</label>
+            <div id="status-area">Ready.</div>
+        </div>
+    </div>
+
+    <script>
+        const BASE_URL = "http://localhost:8000";
+
+        // DOM Elements
+        const userIdsInput = document.getElementById('user-ids');
+        const userIdsError = document.getElementById('user-ids-error');
+        const fromDateInput = document.getElementById('from-date');
+        const fromDateError = document.getElementById('from-date-error');
+        const toDateInput = document.getElementById('to-date');
+        const toDateError = document.getElementById('to-date-error');
+        const btnPull = document.getElementById('btn-pull');
+        const btnInfer = document.getElementById('btn-infer');
+        const btnMlflow = document.getElementById('btn-mlflow');
+        const btnGrafana = document.getElementById('btn-grafana');
+        const statusArea = document.getElementById('status-area');
+
+        // Helper: Validate JSON
+        function validateUserIds() {
+            const val = userIdsInput.value.trim();
+            if (!val) return false; // Or allow empty? user req says validate valid json array
+
+            try {
+                const parsed = JSON.parse(val);
+                if (!Array.isArray(parsed)) {
+                    throw new Error("Not an array");
+                }
+                userIdsError.style.display = 'none';
+                return parsed;
+            } catch (e) {
+                userIdsError.textContent = "Invalid JSON: Must be a valid JSON array example: [\"user1\"]";
+                userIdsError.style.display = 'block';
+                return null;
+            }
+        }
+
+        // Helper: Validate Date
+        function validateDate(input, errorElement) {
+            const val = input.value.trim();
+            if (!val) return null; // Allow empty? Or required? Let's say required for the API request generally, but maybe optional in UI. 
+            // The user didn't specify strictness, but let's enforce format if present.
+
+            const regex = /^\d{4}-\d{2}-\d{2}$/;
+            if (!regex.test(val)) {
+                errorElement.style.display = 'block';
+                return false;
+            }
+            // Basic date validity check (e.g. month 13)
+            const d = new Date(val);
+            if (isNaN(d.getTime())) {
+                errorElement.style.display = 'block';
+                return false;
+            }
+
+            errorElement.style.display = 'none';
+            return val;
+        }
+
+        // Helper: Set Loading State
+        function setLoading(button, isLoading, originalText) {
+            if (isLoading) {
+                button.disabled = true;
+                button.innerHTML = '<span class="spinner"></span>Processing...';
+            } else {
+                button.disabled = false;
+                button.textContent = originalText;
+            }
+        }
+
+        // Helper: Log to Status Area
+        function logStatus(message, isError = false) {
+            const timestamp = new Date().toLocaleTimeString();
+            // Optional: Append history or replace? User asked for "Shows API responses"
+            // usually means replacing the current content for the specific request result seems cleaner for a dashboard card
+            // but let's stick to replacing for clarity of "current operation"
+            statusArea.textContent = `[${timestamp}] ${message}`;
+            if (isError) {
+                statusArea.style.color = 'var(--red)';
+            } else {
+                statusArea.style.color = 'var(--base0)';
+            }
+        }
+
+        // Helper: Generic API Call
+        async function makeRequest(endpoint, buttonId, originalText) {
+            // Validation
+            const userIds = validateUserIds();
+            if (!userIds) {
+                logStatus("Validation Failed: Please check User IDs input.", true);
+                return;
+            }
+
+            // Date Validation
+            const fromDate = validateDate(fromDateInput, fromDateError);
+            if (fromDate === false) {
+                logStatus("Validation Failed: Invalid From Date.", true);
+                return;
+            }
+
+            const toDate = validateDate(toDateInput, toDateError);
+            if (toDate === false) {
+                logStatus("Validation Failed: Invalid To Date.", true);
+                return;
+            }
+            // keeping it simple as per "minimal" constraint.
+
+            const payload = {
+                user_ids: userIds,
+                from_date: fromDate,
+                to_date: toDate
+            };
+
+            const button = document.getElementById(buttonId);
+            setLoading(button, true, originalText);
+            logStatus(`Sending request to ${endpoint}...`);
+
+            try {
+                const response = await fetch(`${BASE_URL}${endpoint}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP Error: ${response.status} ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                statusArea.textContent = JSON.stringify(data, null, 2); // Pretty print
+                statusArea.style.color = 'var(--base0)'; // Reset color
+            } catch (error) {
+                logStatus(`Error: ${error.message}`, true);
+            } finally {
+                setLoading(button, false, originalText);
+            }
+        }
+
+        // Event Listeners
+        btnPull.addEventListener('click', () => makeRequest('/pull', 'btn-pull', 'Pull Data'));
+        btnInfer.addEventListener('click', () => makeRequest('/infer', 'btn-infer', 'Run Inference'));
+
+        btnMlflow.addEventListener('click', () => {
+            window.open(`${BASE_URL}/mlflow`, '_blank');
+        });
+
+        btnGrafana.addEventListener('click', () => {
+            window.open(`${BASE_URL}/grafana`, '_blank');
+        });
+
+        // Initialize Defaults (Optional)
+        // Set today's date?
+        const today = new Date().toISOString().split('T')[0];
+        // toDateInput.value = today; 
+        // fromDateInput.value = today; 
+    </script>
+</body>
+
+</html>
