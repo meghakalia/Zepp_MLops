@@ -918,6 +918,12 @@ async def pull_data(request: PullRequest):
         num_success = sum(results_bool.values())
         num_failed = len(results_bool) - num_success
 
+        # Update last pull metadata for Grafana dashboard
+        _metrics["last_pull_user_ids"] = list(request.user_ids)
+        _metrics["last_pull_from_date"] = request.from_date
+        _metrics["last_pull_to_date"] = request.to_date
+        _metrics["last_pull_timestamp"] = time.time()
+
         return PullResponse(
             user_ids=request.user_ids,
             from_date=request.from_date,
