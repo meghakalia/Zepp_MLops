@@ -424,24 +424,12 @@ async def fresh_inference(request: FreshInferenceRequest, fastapi_request: Reque
         _metrics["last_pull_timestamp"] = time.time()
 
         if request.save_plots_mlflow:
-            from src.inference.plotting import generate_trajectory_plot
-            from src.inference.fresh_inference import _generate_date_list
-            dates_list = _generate_date_list(request.from_date, request.to_date)
-            data_dir_for_plot = os.path.dirname(results.get("processed_excel_path", "")) or DEFAULT_FRESH_DATA_DIR
             try:
-                png_bytes = generate_trajectory_plot(
-                    preds=results["preds"],
-                    targets=results["targets"],
-                    user_id=request.user_id,
-                    dates=dates_list,
-                    data_dir=data_dir_for_plot,
-                    error_dict=results.get("region_errors", {}),
-                )
                 _log_plots_to_mlflow(
                     run_name=f"fresh_inference_{request.user_id}_{request.from_date}_{request.to_date}",
                     from_date=request.from_date,
                     to_date=request.to_date,
-                    per_user_plots={request.user_id: png_bytes},
+                    per_user_plots={request.user_id: results["plot_bytes"]} if results.get("plot_bytes") else {},
                     aggregate=user_metrics,
                     per_user_data={request.user_id: user_metrics},
                 )
@@ -601,11 +589,26 @@ def _log_plots_to_mlflow(
         return
 
     mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
-    mlflow.set_tracking_uri(mlflow_uri)
-    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME", "biocharge-inference")
-    mlflow.set_experiment(experiment_name)
 
     try:
+        mlflow.set_tracking_uri(mlflow_uri)
+        experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME", "biocharge-inference")
+        try:
+            mlflow.set_experiment(experiment_name)
+        except mlflow.exceptions.MlflowException as e:
+            if "deleted experiment" in str(e).lower():
+                # get_experiment_by_name only finds active exps; search deleted ones explicitly
+                client = mlflow.tracking.MlflowClient(tracking_uri=mlflow_uri)
+                from mlflow.entities import ViewType
+                deleted_exps = client.search_experiments(
+                    view_type=ViewType.DELETED_ONLY,
+                    filter_string=f"name = '{experiment_name}'",
+                )
+                if deleted_exps:
+                    client.restore_experiment(deleted_exps[0].experiment_id)
+                mlflow.set_experiment(experiment_name)
+            else:
+                raise
         with mlflow.start_run(run_name=run_name):
             mlflow.log_param("from_date", from_date)
             mlflow.log_param("to_date", to_date)
@@ -665,7 +668,8 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
                 pull_mode=request.pull_mode,
                 skip_pull=request.skip_pull,
                 skip_ground_truth=request.skip_ground_truth,
-                plot=False,
+                plot=request.save_plots_mlflow,  # generate plot while Excel is still alive
+                output_dir=os.path.join(request.data_dir or DEFAULT_FRESH_DATA_DIR, "plots"),
                 predictor=predictor,
             )
             per_user_results.append({
@@ -680,22 +684,11 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
             _metrics["fresh_inference_total"] += 1
 
             if request.save_plots_mlflow:
-                from src.inference.plotting import generate_trajectory_plot
-                from src.inference.fresh_inference import _generate_date_list
-                dates_list = _generate_date_list(request.from_date, request.to_date)
-                data_dir_for_plot = os.path.dirname(result.get("processed_excel_path", "")) or request.data_dir or DEFAULT_FRESH_DATA_DIR
-                try:
-                    png_bytes = generate_trajectory_plot(
-                        preds=result["preds"],
-                        targets=result["targets"],
-                        user_id=uid,
-                        dates=dates_list,
-                        data_dir=data_dir_for_plot,
-                        error_dict=result.get("region_errors", {}),
-                    )
+                png_bytes = result.get("plot_bytes")
+                if png_bytes:
                     per_user_plots[uid] = png_bytes
-                except Exception as plot_err:
-                    logger.warning("Plot generation failed for user %s: %s", uid, plot_err)
+                else:
+                    logger.warning("No plot bytes returned for user %s", uid)
         except Exception as e:
             logger.error("Batch inference failed for user %s: %s", uid, e)
             _metrics["fresh_inference_errors"] += 1
@@ -729,14 +722,17 @@ async def batch_fresh_inference(request: BatchFreshInferenceRequest, fastapi_req
         _metrics["last_overall_traj_mae"] = aggregate.get("overall_traj_mae", float("nan"))
 
     if request.save_plots_mlflow and per_user_plots:
-        _log_plots_to_mlflow(
-            run_name=f"batch_inference_{request.from_date}_{request.to_date}",
-            from_date=request.from_date,
-            to_date=request.to_date,
-            per_user_plots=per_user_plots,
-            aggregate=aggregate,
-            per_user_data=per_user_data,
-        )
+        try:
+            _log_plots_to_mlflow(
+                run_name=f"batch_inference_{request.from_date}_{request.to_date}",
+                from_date=request.from_date,
+                to_date=request.to_date,
+                per_user_plots=per_user_plots,
+                aggregate=aggregate,
+                per_user_data=per_user_data,
+            )
+        except Exception as e:
+            logger.error("MLflow plot logging failed: %s", e)
 
     return BatchFreshInferenceResponse(
         user_ids=user_ids,

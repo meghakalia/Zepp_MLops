@@ -238,6 +238,7 @@ def run_fresh_inference(
                 )
                 if png_bytes:
                     results["plot_path"] = plot_path
+                    results["plot_bytes"] = png_bytes
                     print(f"Plot saved: {plot_path}")
             except Exception as e:
                 print(f"Warning: Plot generation failed: {e}")
