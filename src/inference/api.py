@@ -809,7 +809,7 @@ async def batch_inference(request: BatchFreshInferenceRequest, fastapi_request: 
                 pull_mode=request.pull_mode,
                 skip_pull=True,  # always skip pull — use /pull endpoint to fetch data
                 skip_ground_truth=request.skip_ground_truth,
-                plot=request.save_plots_mlflow,
+                plot=True,  # always generate plots for MLflow
                 output_dir=os.path.join(request.data_dir or DEFAULT_FRESH_DATA_DIR, "plots"),
                 predictor=predictor,
             )
@@ -855,18 +855,18 @@ async def batch_inference(request: BatchFreshInferenceRequest, fastapi_request: 
         _metrics["last_day_end_mae"] = aggregate.get("day_end_mae", float("nan"))
         _metrics["last_overall_traj_mae"] = aggregate.get("overall_traj_mae", float("nan"))
 
-    if request.save_plots_mlflow and per_user_plots:
-        try:
-            _log_plots_to_mlflow(
-                run_name=f"batch_inference_{request.from_date}_{request.to_date}",
-                from_date=request.from_date,
-                to_date=request.to_date,
-                per_user_plots=per_user_plots,
-                aggregate=aggregate,
-                per_user_data=per_user_data,
-            )
-        except Exception as e:
-            logger.error("MLflow plot logging failed: %s", e)
+    # Always log metrics and plots to MLflow for every inference run
+    try:
+        _log_plots_to_mlflow(
+            run_name=f"batch_inference_{request.from_date}_{request.to_date}",
+            from_date=request.from_date,
+            to_date=request.to_date,
+            per_user_plots=per_user_plots,
+            aggregate=aggregate,
+            per_user_data=per_user_data,
+        )
+    except Exception as e:
+        logger.error("MLflow logging failed: %s", e)
 
     return BatchFreshInferenceResponse(
         user_ids=user_ids,

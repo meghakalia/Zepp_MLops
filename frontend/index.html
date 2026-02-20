@@ -231,6 +231,12 @@
             </div>
         </div>
 
+        <!-- Options -->
+        <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem;">
+            <input type="checkbox" id="save-plots" style="width:auto; margin:0;">
+            <label for="save-plots" style="margin:0; cursor:pointer;">Save plots to MLflow</label>
+        </div>
+
         <!-- Actions -->
         <div class="button-row">
             <button id="btn-pull" class="btn-action">Pull Data</button>
@@ -260,6 +266,7 @@
         const btnInfer = document.getElementById('btn-infer');
         const btnMlflow = document.getElementById('btn-mlflow');
         const btnGrafana = document.getElementById('btn-grafana');
+        const savePlotsCheckbox = document.getElementById('save-plots');
         const statusArea = document.getElementById('status-area');
 
         // Helper: Validate JSON
@@ -354,7 +361,8 @@
             const payload = {
                 user_ids: userIds,
                 from_date: fromDate,
-                to_date: toDate
+                to_date: toDate,
+                save_plots_mlflow: savePlotsCheckbox.checked
             };
 
             const button = document.getElementById(buttonId);
